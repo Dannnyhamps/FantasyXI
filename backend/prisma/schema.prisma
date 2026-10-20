@@ -855,3 +855,82 @@ model ScoreAdjustmentLog {
   @@index([runId])
   @@map("score_adjustment_logs")
 }
+
+// ============================================================
+// MULTI-TENANT SCHEMA ISOLATION
+// ============================================================
+
+/// Tenant registry: maps tenant IDs to PostgreSQL schemas.
+/// Each entry represents a logical tenant (ENTERPRISE, SPONSORED, or PUBLIC tier).
+/// PUBLIC tier uses the shared 'public' schema; others get dedicated schemas (tenant_<id>, sponsored_<id>).
+model Tenant {
+  id              String   @id @default(uuid())
+  /// Tenant tier: PUBLIC (shared), ENTERPRISE (isolated), SPONSORED (isolated)
+  tier            String   // TenantTier enum: PUBLIC | ENTERPRISE | SPONSORED
+  /// PostgreSQL schema name (e.g., 'public', 'tenant_<uuid>', 'sponsored_<uuid>')
+  schemaName      String   @unique @map("schema_name")
+  /// Human-readable tenant name for logging/audit
+  displayName     String   @map("display_name")
+  /// Data retention period in days; respects tier quotas (default 365)
+  retentionDays   Int      @default(365) @map("retention_days")
+  /// Maximum leagues this tenant can create (enforced per tier)
+  maxLeagues      Int      @default(100) @map("max_leagues")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  /// Soft-delete flag: false means tenant is inactive but schema is preserved
+  isActive        Boolean  @default(true) @map("is_active")
+
+  /// Audit log entries for this tenant
+  securityAudits  TenantSecurityAudit[]
+  /// Migration tracking for this tenant
+  migrations      TenantMigration[]
+
+  @@index([isActive])
+  @@index([tier, isActive])
+  @@map("tenants")
+}
+
+/// Security audit log for tenant boundary violations and suspicious activity.
+/// Records cross-tenant access attempts, schema injection blocks, unauthorized tier access, etc.
+model TenantSecurityAudit {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  /// User who attempted the violation (if authenticated)
+  userId          String?  @map("user_id")
+  /// Schema name that was attempted/blocked
+  attemptedSchema String   @map("attempted_schema")
+  /// Type: cross_tenant_access_attempt | invalid_schema | unauthorized_tier_access | schema_injection_blocked
+  violationType   String   @map("violation_type")
+  /// HTTP request path for tracing
+  requestPath     String?  @map("request_path")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  /// Reference to the tenant involved
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([violationType, createdAt])
+  @@map("tenant_security_audits")
+}
+
+/// Migration tracking per tenant: records which migrations have been applied to each schema.
+/// Used by multiTenantMigration script to ensure idempotent, resumable migrations.
+model TenantMigration {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  /// Migration name (e.g., '20240101_000000_init_tables')
+  migrationName  String   @map("migration_name")
+  /// When this migration was applied to the tenant's schema
+  appliedAt      DateTime @default(now()) @map("applied_at")
+  /// Status: success | failed | pending | rolled_back
+  status         String   @default("success")
+  /// Error message if status is 'failed'
+  errorMessage   String?  @map("error_message")
+
+  /// Reference to the tenant
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, migrationName])
+  @@index([tenantId, appliedAt])
+  @@map("tenant_migrations")
+}
