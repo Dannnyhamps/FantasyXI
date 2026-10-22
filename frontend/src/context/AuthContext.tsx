@@ -1,8 +1,13 @@
+import {
+  broadcastSessionRevocation,
+  useCrossTabSessionSync,
+} from "@/hooks/useCrossTabSessionSync";
 "use client";
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { User, AuthResponse, ApiSuccessResponse } from "@/types";
 import { api } from "@/lib/api";
+import { authenticateWithPasskey, type PublicKeyCredentialRequestOptionsJSON } from "@/lib/passkeys";
 import {
   clearOfflineData,
   isOfflineError,
@@ -16,6 +21,8 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (token: string, user: User) => void;
+  /** Passkey sign-in; pass the options of a WEBAUTHN login challenge to complete a step-up (issue #273) */
+  loginWithPasskey: (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => Promise<void>;
   logout: () => void;
   setAuthToken: (token: string) => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -74,14 +81,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(newUser);
   };
 
+  const loginWithPasskey = async (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => {
+    const session = await authenticateWithPasskey(stepUpOptions);
+    login(session.token, session.user);
+  };
+
   const logout = () => {
     if (typeof window !== "undefined") {
       localStorage.removeItem("token");
       clearOfflineData();
+      broadcastSessionRevocation({
+        type: "LOGOUT",
+        timestamp: Date.now(),
+      });
     }
     setToken(null);
     setUser(null);
   };
+
+  // Cross-tab & multi-device remote invalidation listener
+  useCrossTabSessionSync({
+    token,
+    onSessionRevoked: () => {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("token");
+        clearOfflineData();
+      }
+      setToken(null);
+      setUser(null);
+    },
+  });
 
   const setAuthToken = async (newToken: string) => {
     if (typeof window !== "undefined") {
@@ -105,6 +134,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         isAuthenticated: !!user && !!token,
         login,
+        loginWithPasskey,
         logout,
         setAuthToken,
         refreshUser,

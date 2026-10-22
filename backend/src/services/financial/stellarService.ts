@@ -506,6 +506,7 @@ export class StellarService {
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
     platformFeeStroops: bigint,
+    distributionBps?: number[]
     beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
@@ -526,6 +527,7 @@ export class StellarService {
       winners,
       stellarConfig.treasuryAddress,
       platformFeeStroops,
+      distributionBps
       beforeSubmit
     );
   }
@@ -574,6 +576,16 @@ export class StellarService {
     }
     const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
     return client.refund(adminSecret, adminPublic, leagueId, participants);
+  }
+
+  /** Refund one authenticated deposit without cancelling the league. */
+  public async refundDeposit(leagueId: number | bigint, participant: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) throw new Error("TESTNET_ADMIN_SECRET is required to execute refunds");
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.refundDeposit(adminSecret, adminPublic, leagueId, participant);
   }
 
   /**

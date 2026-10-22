@@ -492,7 +492,8 @@ export async function acceptLeagueInvitation(
 
 /**
  * GET /api/v1/leagues/:id/live — Server-Sent Events stream of live matchday snapshots.
- * Pushes a snapshot on connect and every LIVE_FEED_INTERVAL_MS (default 15s).
+ * Pushes a snapshot on connect and every second by default. The interval is
+ * capped at 1.5s to keep provisional bonus updates within the 2s target.
  */
 export async function streamLeagueLive(
   req: Request,
@@ -523,7 +524,8 @@ export async function streamLeagueLive(
     };
     send("snapshot", first);
 
-    const intervalMs = Number(process.env.LIVE_FEED_INTERVAL_MS) || 15_000;
+    const requestedIntervalMs = Number(process.env.LIVE_FEED_INTERVAL_MS) || 1_000;
+    const intervalMs = Math.min(Math.max(requestedIntervalMs, 250), 1_500);
     const timer = setInterval(async () => {
       try {
         const snapshot = await liveService.getLeagueSnapshot(leagueId);
@@ -536,5 +538,72 @@ export async function streamLeagueLive(
     req.on("close", () => clearInterval(timer));
   } catch (error) {
     next(error);
+  }
+}
+
+import { SwissTournamentService } from "../services/league/swissTournamentService.js";
+
+export async function initSwissTournament(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const { participants, totalRounds } = req.body;
+    const tournament = SwissTournamentService.createTournament(
+      leagueId,
+      participants,
+      totalRounds
+    );
+    res.status(201).json({ success: true, data: tournament });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function getSwissStandings(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const standings = SwissTournamentService.getStandings(leagueId);
+    res.json({ success: true, data: standings });
+  } catch (error) {
+    res.status(404).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function getSwissCurrentRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const round = SwissTournamentService.getCurrentRound(leagueId);
+    res.json({ success: true, data: round });
+  } catch (error) {
+    res.status(404).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function advanceSwissRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const { gameweekId } = req.body;
+    const round = SwissTournamentService.startOrAdvanceRound(
+      leagueId,
+      Number(gameweekId || 1)
+    );
+    res.json({ success: true, data: round });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function resolveSwissRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const round = req.params.round as string;
+    const { results } = req.body;
+    const state = SwissTournamentService.submitRoundResults(
+      leagueId,
+      Number(round),
+      results
+    );
+    res.json({ success: true, data: state });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
   }
 }

@@ -198,8 +198,27 @@ export class EscrowEventIndexer {
     switch (name) {
       case "deposit": {
         const [participant, amountStroops] = scValToNative(event.value) as [string, bigint];
+        const amountUsdc = Number(amountStroops) / 10_000_000;
+
+        const flagDeposit = async (reason: string, leagueId: string | null, expectedAmount?: number) => {
+          if (!this.db.depositException) return;
+          await this.db.depositException.upsert({
+            where: { txHash: event.txHash },
+            create: {
+              txHash: event.txHash,
+              leagueId,
+              contractLeagueId: contractLeagueId.toString(),
+              senderAddress: participant,
+              amount: amountUsdc,
+              expectedAmount: expectedAmount ?? null,
+              reason,
+            },
+            update: {},
+          });
+        };
 
         if (!league) {
+          await flagDeposit("UNKNOWN_LEAGUE", null);
           console.warn(`[indexer] Deposit for unknown league ${contractLeagueId} (tx ${event.txHash})`);
           return false;
         }
@@ -217,9 +236,23 @@ export class EscrowEventIndexer {
           },
         });
         if (!member) {
+          const occupiedSlots = await this.db.leagueMember.count({ where: { leagueId: league.id } });
+          await flagDeposit(occupiedSlots >= league.maxMembers ? "LEAGUE_OVER_CAPACITY" : "UNLINKED_SENDER", league.id);
           console.warn(
             `[indexer] No member of league ${league.id} for ${participant} (tx ${event.txHash})`
           );
+          return false;
+        }
+
+        const expectedAmount = Number(league.entryFee);
+        if (Math.abs(amountUsdc - expectedAmount) > 0.0000001) {
+          await flagDeposit("AMOUNT_MISMATCH", league.id, expectedAmount);
+          console.warn(`[indexer] Deposit amount mismatch for member ${member.id} (tx ${event.txHash})`);
+          return false;
+        }
+        const memberCount = await this.db.leagueMember.count({ where: { leagueId: league.id } });
+        if (memberCount > league.maxMembers) {
+          await flagDeposit("LEAGUE_OVER_CAPACITY", league.id, expectedAmount);
           return false;
         }
 
@@ -234,7 +267,7 @@ export class EscrowEventIndexer {
 
         const isAlreadyConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
 
-        await this.db.$transaction([
+        const depositUpdates: Promise<unknown>[] = [
           this.db.leagueMember.update({
             where: { id: member.id },
             data: {
@@ -266,7 +299,11 @@ export class EscrowEventIndexer {
               confirmedAt,
             },
           }),
-        ]);
+        ];
+        if (this.db.depositException?.deleteMany) {
+          depositUpdates.push(this.db.depositException.deleteMany({ where: { txHash: event.txHash } }));
+        }
+        await this.db.$transaction(depositUpdates);
 
         if (!isAlreadyConfirmed && member.user?.email) {
           try {
@@ -438,6 +475,24 @@ export class EscrowEventIndexer {
             stellarTxHash: `${event.txHash}-${m.id}`,
             metadata: { memberId: m.id, ledgerSeq: event.ledger, source: "indexer" },
           });
+        }
+        return true;
+      }
+
+      case "DepositRefunded": {
+        const [participant] = scValToNative(event.value) as [string, bigint];
+        if (this.db.depositRefundClaim) {
+          const claim = await this.db.depositRefundClaim.findFirst({
+            where: {
+              exception: { contractLeagueId: contractLeagueId.toString(), senderAddress: participant },
+            },
+          });
+          if (claim && claim.status !== "PAID") {
+            await this.db.depositRefundClaim.update({
+              where: { id: claim.id },
+              data: { status: "PAID", completedAt: confirmedAt },
+            });
+          }
         }
         return true;
       }

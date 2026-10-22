@@ -412,7 +412,7 @@ export class ScoringService {
         where: { squadId_gameweekId: { squadId, gameweekId } },
       }),
     ]);
-    const chip = chipUsage?.chipType ?? null;
+    const chip = chipUsage && !chipUsage.cancelledAt ? chipUsage.chipType : null;
 
     const result = ScoringService.calculateLineupScore(formattedPlayers, statsMap, {
       chip,

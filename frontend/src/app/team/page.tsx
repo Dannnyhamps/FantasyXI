@@ -5,10 +5,16 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
+import { getQueuedMutationCount, hasUnsyncedMutations } from "@/lib/offlineQueue";
+import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import {
   enqueueSquadMutation,
+  getQueuedMutations,
   getQueuedMutationCount,
+  removeQueuedMutation,
   syncQueuedMutations,
+  updateQueuedMutationRevision,
+  type QueuedSquadMutation,
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
@@ -18,6 +24,7 @@ import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
+import { useSquadSolver } from "@/hooks/useSquadSolver";
 import {
   IconFootball,
   IconCheck,
@@ -39,7 +46,7 @@ import {
   DragOverlay,
 } from "@dnd-kit/core";
 
-import { useTeamStore, LocalSquadPlayer } from "@/store/teamStore";
+import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
 
 export default function TeamPage() {
@@ -55,8 +62,25 @@ export default function TeamPage() {
     activeDragPlayer, setActiveDragPlayer,
     substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
-    handleSwap, handleSetCaptain, handleSetViceCaptain
+    handleSwap, handleSetCaptain, handleSetViceCaptain,
+    setOwnerId, hydrateFromSquad, persistLineupOffline
   } = useTeamStore();
+
+  const { isSolving, validateSquad: solveSquad } = useSquadSolver();
+  const [solverResult, setSolverResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
+
+  useEffect(() => {
+    const solverPayload = players.map((p) => ({
+      id: p.playerId,
+      position: p.player.position,
+      teamId: p.player.teamId,
+      price: p.player.price,
+      isStarter: p.isStarter,
+    }));
+    solveSquad(solverPayload)
+      .then((res) => setSolverResult(res))
+      .catch(() => {});
+  }, [players, solveSquad]);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -65,27 +89,35 @@ export default function TeamPage() {
   const isOnline = useOnlineStatus();
   const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
   const [queuedMutationsCount, setQueuedMutationsCount] = useState<number>(0);
+  const [squadRevision, setSquadRevision] = useState<string | undefined>();
+  const [conflictMutation, setConflictMutation] = useState<QueuedSquadMutation | null>(null);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
   const showingSnapshot = useRef(false);
-  const prevOnlineRef = useRef(isOnline);
   const userId = user?.id;
 
   // Refresh queued mutations count
   const refreshQueueCount = async () => {
     try {
-      const count = await getQueuedMutationCount();
+      const [count, queued] = await Promise.all([getQueuedMutationCount(), getQueuedMutations()]);
       setQueuedMutationsCount(count);
+      setConflictMutation(queued.find((mutation) => mutation.status === "conflict") ?? null);
     } catch {
       // Ignore in unsupported environments
     }
   };
 
-  const handleManualSync = async (isAuto = false) => {
+  // Toasts, retries and conflict rollback are handled by the sync coordinator
+  const handleManualSync = async () => {
     if (isSyncingOfflineQueue) return;
     setIsSyncingOfflineQueue(true);
     try {
-      const res = await syncQueuedMutations();
+      await flushOfflineQueue();
       await refreshQueueCount();
+      if (res.conflicts.length > 0) {
+        const queued = await getQueuedMutations();
+        setConflictMutation(queued.find((mutation) => mutation.id === res.conflicts[0].id) ?? null);
+        toast.info("An offline lineup edit conflicts with the latest server version. Choose how to resolve it below.");
+      }
       if (res.succeeded > 0) {
         const msg = isAuto
           ? `Auto-synced ${res.succeeded} squad update(s) to server!`
@@ -102,6 +134,23 @@ export default function TeamPage() {
     }
   };
 
+  // Listen to queue changes and register SW. Automatic syncing on reconnection
+  // is app-wide (see OfflineIndicator -> startOfflineSyncCoordinator).
+  const useServerSquadVersion = async () => {
+    if (!conflictMutation) return;
+    await removeQueuedMutation(conflictMutation.id);
+    setConflictMutation(null);
+    await refreshQueueCount();
+    window.location.reload();
+  };
+
+  const keepOfflineSquadVersion = async () => {
+    if (!conflictMutation?.serverRevision) return;
+    await updateQueuedMutationRevision(conflictMutation.id, conflictMutation.serverRevision);
+    setConflictMutation(null);
+    await handleManualSync(false);
+  };
+
   // Listen to queue changes, SW messages, and register SW
   useEffect(() => {
     refreshQueueCount();
@@ -111,36 +160,14 @@ export default function TeamPage() {
       refreshQueueCount();
     };
 
-    const handleSwMessage = (event: MessageEvent) => {
-      if (event.data?.type === "SYNC_SQUAD_MUTATIONS") {
-        handleManualSync();
-      }
-    };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener("offline-queue-change", handleQueueChange);
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.addEventListener("message", handleSwMessage);
-      }
-    }
-
-    return () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("offline-queue-change", handleQueueChange);
-        if ("serviceWorker" in navigator) {
-          navigator.serviceWorker.removeEventListener("message", handleSwMessage);
-        }
-      }
-    };
+    window.addEventListener("offline-queue-change", handleQueueChange);
+    return () => window.removeEventListener("offline-queue-change", handleQueueChange);
   }, []);
 
-  // Auto-sync when reconnecting online
+  // Offline lineup edits are queued for this manager (issue #334)
   useEffect(() => {
-    if (!prevOnlineRef.current && isOnline) {
-      handleManualSync(true);
-    }
-    prevOnlineRef.current = isOnline;
-  }, [isOnline]);
+    setOwnerId(userId ?? null);
+  }, [userId, setOwnerId]);
   
   // Wildcard chip state
   const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
@@ -159,10 +186,12 @@ export default function TeamPage() {
     let cancelled = false;
 
     const applySquads = (squads: Squad[]) => {
+      if (squads.length > 0) hydrateFromSquad(squads[0]);
       if (squads.length === 0) return;
       const s = squads[0];
       setSquadId(s.id);
       setSquadName(s.name);
+      setSquadRevision(s.updatedAt);
 
       if (s.players && s.players.length > 0) {
         const mapped: LocalSquadPlayer[] = s.players
@@ -188,8 +217,15 @@ export default function TeamPage() {
           api.get<{ success: boolean; data: { id: number; name: string; deadline: string } | null }>("/api/v1/gameweeks/current"),
         ]);
         if (cancelled) return;
-        
-        if (squadRes?.data) {
+
+        // Changes queued offline are newer than the server copy: keep showing
+        // them (from the snapshot) until the sync coordinator replays them
+        const pendingSnapshot = (await hasUnsyncedMutations(userId!)) ? loadSquadSnapshot(userId!) : null;
+        if (cancelled) return;
+
+        if (pendingSnapshot) {
+          applySquads(pendingSnapshot.squads);
+        } else if (squadRes?.data) {
           saveSquadSnapshot(userId!, squadRes.data);
           applySquads(squadRes.data);
           
@@ -240,7 +276,7 @@ export default function TeamPage() {
       cancelled = true;
       window.removeEventListener("online", handleOnline);
     };
-  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
+  }, [isAuthenticated, authLoading, router, userId, hydrateFromSquad]);
 
   // Derived state
   const starters = players
@@ -503,26 +539,21 @@ export default function TeamPage() {
   const handleSaveSquad = async () => {
     if (!canSave) return;
 
-    const payload = {
-      name: squadName.trim() || "My Fantasy XI",
-      players: players.map((p, idx) => ({
-        playerId: p.playerId,
-        isStarter: p.isStarter,
-        isCaptain: p.isCaptain,
-        isViceCaptain: p.isViceCaptain,
-        positionOrder: idx + 1,
-      })),
-    };
+    const payload = buildSquadPayload(squadName, players);
 
     if (!isOnline) {
       setIsSaving(true);
       setErrorMessage(null);
       try {
+        // Queues the lineup and updates the local snapshot so it survives reloads
+        if (!(await persistLineupOffline())) {
+          throw new Error("This lineup can't be queued offline. Complete your squad and try again.");
         await enqueueSquadMutation({
           squadId,
           userId,
           action: squadId ? "update" : "create",
           payload,
+          baseRevision: squadRevision,
         });
 
         // Also update local snapshot so the squad stays visible offline
@@ -573,7 +604,11 @@ export default function TeamPage() {
         // Optimistic update: assume success, rollback on failure
         let rollback = false;
         try {
-          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const response = await api.put<{ success: boolean; data: Squad }>(`/api/v1/squads/${squadId}`, {
+            ...payload,
+            expectedUpdatedAt: squadRevision,
+          });
+          setSquadRevision(response.data.updatedAt);
           const msg = "Squad lineup and tactics updated successfully!";
           setSaveSuccessMsg(msg);
           toast.success(msg);
@@ -782,18 +817,55 @@ export default function TeamPage() {
             <div className="flex items-center gap-3">
               <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
               <span className="font-semibold">
-                {`Offline: ${queuedMutationsCount} change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
+                {conflictMutation
+                  ? "An offline lineup edit needs conflict resolution"
+                  : `${queuedMutationsCount} squad change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
               </span>
             </div>
             <button
               type="button"
-              onClick={() => handleManualSync(false)}
+              onClick={() => handleManualSync()}
               disabled={isSyncingOfflineQueue || !isOnline}
+              onClick={() => handleManualSync(false)}
+              disabled={isSyncingOfflineQueue || !isOnline || Boolean(conflictMutation)}
               className="px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold uppercase tracking-wider text-[11px] transition-all disabled:opacity-50 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:cursor-not-allowed"
             >
               {isSyncingOfflineQueue ? "Syncing..." : "Sync Now"}
             </button>
           </div>
+        )}
+
+        {conflictMutation && (
+          <section
+            role="alertdialog"
+            aria-labelledby="offline-conflict-title"
+            aria-describedby="offline-conflict-description"
+            className="rounded-xl border border-amber-500/50 bg-amber-950/70 p-5 space-y-3"
+            data-testid="offline-conflict-dialog"
+          >
+            <h2 id="offline-conflict-title" className="text-sm font-bold text-amber-100">Your squad changed elsewhere</h2>
+            <p id="offline-conflict-description" className="text-xs text-amber-200">
+              Another update reached the server while this device was offline. Use the current server squad or retry your lineup against its latest revision.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={useServerSquadVersion}
+                disabled={!isOnline}
+                className="rounded-md bg-slate-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+              >
+                Use server version
+              </button>
+              <button
+                type="button"
+                onClick={keepOfflineSquadVersion}
+                disabled={!isOnline || !conflictMutation.serverRevision}
+                className="rounded-md bg-amber-500/20 px-3 py-2 text-xs font-bold text-amber-100 disabled:opacity-50"
+              >
+                Keep my offline changes
+              </button>
+            </div>
+          </section>
         )}
 
         {/* Offline mode: read-only view of the squad saved on this device */}

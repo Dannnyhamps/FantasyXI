@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/error.middleware.js";
+import { getJwks } from "./controllers/auth.controller.js";
+
 import { requestReadConsistency } from "./middleware/readConsistency.js";
 
 // Multi-tenant middleware
@@ -30,6 +32,8 @@ app.use(
   cors({
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true,
+    // Lets the browser read the FPL degradation flag (issue #275)
+    exposedHeaders: ["X-Data-Stale"],
   })
 );
 app.use(express.json());
@@ -188,6 +192,10 @@ app.post("/api/v1/admin/tenants", async (req: Request, res: Response) => {
 // ================================================================
 // All routes under /api/v1 inherit the tenant middleware stack
 
+// Public JWK Set for access-token verification (issue #332)
+app.get("/.well-known/jwks.json", getJwks);
+
+// API v1 Routes
 app.use("/api/v1", apiV1Router);
 app.use("/api", apiV1Router);
 

@@ -54,6 +54,11 @@ enum ScoringType {
   HEAD_TO_HEAD
 }
 
+enum MatchmakingStatus {
+  QUEUED
+  MATCHED
+}
+
 /// The season-end movement applied to a league across tier ladder boundaries.
 enum LeagueTierMovement {
   STAY
@@ -165,6 +170,12 @@ model User {
   createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
   usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
   chatMessages       LeagueChatMessage[]
+  matchRating        MatchRating?
+  depositRefundClaims DepositRefundClaim[]
+  matchmakingQueueEntry MatchmakingQueueEntry? @relation("MatchmakingQueueOwner")
+  matchedQueueEntries  MatchmakingQueueEntry[] @relation("MatchmakingMatchedUser")
+  webAuthnCredentials  WebAuthnCredential[]
+  accountSignals       AccountSignal[]
 
   @@map("users")
 }
@@ -263,7 +274,9 @@ model Gameweek {
   leaguesStarting League[]              @relation("LeagueStartGW")
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
+  chipCancellations SquadChipCancellation[]
   leagueFixtures  LeagueFixture[]
+  matchRatingHistory MatchRatingHistory[]
 
   @@map("gameweeks")
 }
@@ -305,6 +318,7 @@ model PlayerGameweekStats {
   yellowCards Int     @default(0) @map("yellow_cards")
   redCards    Int     @default(0) @map("red_cards")
   saves       Int     @default(0)
+  bps         Int     @default(0)
   bonus       Int     @default(0)
   totalPoints Int     @default(0) @map("total_points")
 
@@ -337,6 +351,7 @@ model Squad {
   transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
+  chipCancellations SquadChipCancellation[]
 
   @@map("squads")
 }
@@ -375,6 +390,8 @@ model League {
   prizePool       Decimal      @default(0) @map("prize_pool") @db.Decimal(10, 2)
   status          LeagueStatus @default(UPCOMING)
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
+  payoutPreset    String       @default("standard") @map("payout_preset")
+  payoutSplitsBps Int[]        @default([]) @map("payout_splits_bps")
   /// Private leagues are hidden from public search and joinable only via invitation
   isPrivate       Boolean      @default(false) @map("is_private")
   startGameweekId Int          @map("start_gameweek_id")
@@ -392,6 +409,7 @@ model League {
   invitations   LeagueInvitation[]
   chatMessages  LeagueChatMessage[]
   seasons       LeagueSeason[]
+  depositExceptions DepositException[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
@@ -604,10 +622,12 @@ model SquadChipUsage {
   /// Free Hit only: the squad's lineup before the chip, restored after the gameweek
   previousLineup Json?     @map("previous_lineup")
   revertedAt     DateTime? @map("reverted_at")
+  cancelledAt    DateTime? @map("cancelled_at")
 
   // Relations
   squad    Squad    @relation(fields: [squadId], references: [id], onDelete: Cascade)
   gameweek Gameweek @relation(fields: [gameweekId], references: [id])
+  cancellations SquadChipCancellation[]
 
   @@unique([squadId, season, chipType])
   @@unique([squadId, gameweekId])
@@ -643,6 +663,108 @@ model LeagueFixture {
 
   @@unique([leagueId, gameweekId, homeMemberId])
   @@map("league_fixtures")
+}
+
+/// Immutable record of a chip cancellation and the squad state restored by it.
+model SquadChipCancellation {
+  id          Int      @id @default(autoincrement())
+  usageId     Int      @map("usage_id")
+  squadId     String   @map("squad_id")
+  gameweekId  Int      @map("gameweek_id")
+  chipType    ChipType @map("chip_type")
+  cancelledAt DateTime @default(now()) @map("cancelled_at")
+  snapshot    Json
+  usage       SquadChipUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
+  squad       Squad          @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  gameweek    Gameweek       @relation(fields: [gameweekId], references: [id])
+
+  @@index([squadId, gameweekId, cancelledAt])
+  @@map("squad_chip_cancellations")
+}
+
+/// Current competitive rating used for H2H matchmaking.
+model MatchRating {
+  userId      String   @id @map("user_id")
+  rating      Float    @default(1200)
+  gamesPlayed Int      @default(0) @map("games_played")
+  volatility  Float    @default(0)
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history     MatchRatingHistory[]
+
+  @@index([rating, userId])
+  @@map("match_ratings")
+}
+
+/// Idempotent per-gameweek rating ledger for reproducible rank updates.
+model MatchRatingHistory {
+  id           Int         @id @default(autoincrement())
+  userId       String      @map("user_id")
+  gameweekId   Int         @map("gameweek_id")
+  ratingBefore Float       @map("rating_before")
+  ratingAfter  Float       @map("rating_after")
+  delta        Float
+  createdAt    DateTime    @default(now()) @map("created_at")
+  rating       MatchRating @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  gameweek     Gameweek    @relation(fields: [gameweekId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameweekId])
+  @@index([gameweekId, userId])
+  @@map("match_rating_history")
+}
+
+/// A user's active public matchmaking request and its matched opponent, if any.
+model MatchmakingQueueEntry {
+  id                String            @id @default(uuid())
+  userId            String            @unique @map("user_id")
+  ratingAtRequest   Float             @map("rating_at_request")
+  tolerance         Int               @default(200)
+  status            MatchmakingStatus @default(QUEUED)
+  matchedUserId     String?           @map("matched_user_id")
+  joinedAt          DateTime          @default(now()) @map("joined_at")
+  matchedAt         DateTime?         @map("matched_at")
+  user              User              @relation("MatchmakingQueueOwner", fields: [userId], references: [id], onDelete: Cascade)
+  matchedUser       User?             @relation("MatchmakingMatchedUser", fields: [matchedUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, ratingAtRequest, joinedAt])
+  @@map("matchmaking_queue_entries")
+}
+
+/// On-chain deposits that could not be safely linked to an eligible league member.
+model DepositException {
+  id               String   @id @default(uuid())
+  txHash           String   @unique @map("tx_hash")
+  leagueId         String?  @map("league_id")
+  contractLeagueId String   @map("contract_league_id")
+  senderAddress    String   @map("sender_address")
+  amount           Decimal  @db.Decimal(18, 7)
+  expectedAmount   Decimal? @map("expected_amount") @db.Decimal(18, 7)
+  reason           String
+  detectedAt       DateTime @default(now()) @map("detected_at")
+  league           League?  @relation(fields: [leagueId], references: [id], onDelete: SetNull)
+  claim            DepositRefundClaim?
+
+  @@index([leagueId, detectedAt])
+  @@index([senderAddress, detectedAt])
+  @@map("deposit_exceptions")
+}
+
+/// A signed, idempotent request to refund a specific deposit exception.
+model DepositRefundClaim {
+  id            String          @id @default(uuid())
+  exceptionId   String          @unique @map("exception_id")
+  userId        String          @map("user_id")
+  senderAddress String          @map("sender_address")
+  signature     String
+  status        String          @default("PENDING")
+  refundTxHash  String?         @unique @map("refund_tx_hash")
+  requestedAt   DateTime        @default(now()) @map("requested_at")
+  completedAt   DateTime?       @map("completed_at")
+  exception     DepositException @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, requestedAt])
+  @@map("deposit_refund_claims")
 }
 
 /// Tracks Soroban RPC event indexer position and pagination cursor
@@ -933,4 +1055,91 @@ model TenantMigration {
   @@unique([tenantId, migrationName])
   @@index([tenantId, appliedAt])
   @@map("tenant_migrations")
+/// Asymmetric access-token signing key (issue #332). A key signs from
+/// activatesAt until a successor activates, then only verifies until retiresAt.
+model JwtSigningKey {
+  /// Key ID carried in the JWT `kid` header
+  kid                 String    @id
+  algorithm           String
+  /// Public key as a JWK (RFC 7517), served from /.well-known/jwks.json
+  publicJwk           Json      @map("public_jwk")
+  /// PKCS#8 private key, AES-256-GCM encrypted with a key derived from JWT_SECRET
+  encryptedPrivateKey String    @map("encrypted_private_key")
+  activatesAt         DateTime  @map("activates_at")
+  retiresAt           DateTime? @map("retires_at")
+  revokedAt           DateTime? @map("revoked_at")
+  revokedReason       String?   @map("revoked_reason")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  @@index([revokedAt, retiresAt])
+  @@map("jwt_signing_keys")
+}
+
+/// FIDO2 / WebAuthn passkey registered to an account (issue #273)
+model WebAuthnCredential {
+  /// Credential ID (base64url), as returned by the authenticator
+  id         String    @id
+  userId     String    @map("user_id")
+  /// COSE-encoded credential public key
+  publicKey  Bytes     @map("public_key")
+  /// Signature counter (W3C WebAuthn §6.1.1), an unsigned 32-bit value
+  counter    BigInt    @default(0)
+  transports String[]  @default([])
+  /// singleDevice | multiDevice (synced passkey)
+  deviceType String    @map("device_type")
+  backedUp   Boolean   @map("backed_up")
+  aaguid     String
+  name       String
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
+/// Login signature kinds linking accounts in the Sybil graph (issue #274)
+enum AccountSignalType {
+  /// SHA-256 device ID (loginSecurityService.deriveDeviceId)
+  DEVICE
+  /// Client network: IPv4 /24 or IPv6 /64, in CIDR notation
+  IP_SUBNET
+}
+
+/// Login signatures observed per account. The (type, value) prefix of the
+/// primary key is the inverted index "signal -> accounts" (issue #274).
+model AccountSignal {
+  type        AccountSignalType
+  value       String
+  userId      String            @map("user_id")
+  firstSeenAt DateTime          @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([type, value, userId])
+  @@index([userId])
+  @@map("account_signals")
+}
+
+/// Account that created (funded) a Stellar address, resolved once from
+/// Horizon's create_account operation; immutable on-chain (issue #274)
+model StellarAccountFunder {
+  address    String   @id
+  funder     String
+  resolvedAt DateTime @default(now()) @map("resolved_at")
+
+  @@index([funder])
+  @@map("stellar_account_funders")
+}
+
+/// Last good payload per FPL endpoint: the L3 fallback served while the FPL
+/// API is unavailable and the cache tiers are empty (issue #275)
+model FplApiSnapshot {
+  endpoint  String   @id
+  payload   Json
+  fetchedAt DateTime @map("fetched_at")
+
+  @@map("fpl_api_snapshots")
 }

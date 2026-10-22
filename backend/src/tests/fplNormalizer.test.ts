@@ -143,6 +143,7 @@ describe("FPL Normalizer", () => {
         yellow_cards: 0,
         red_cards: 0,
         saves: 0,
+        bps: 29,
         bonus: 3,
         total_points: 13,
       },
@@ -153,6 +154,7 @@ describe("FPL Normalizer", () => {
             { identifier: "minutes", points: 2, value: 90 },
             { identifier: "goals_scored", points: 8, value: 2 },
             { identifier: "assists", points: 3, value: 1 },
+            { identifier: "bps", points: 0, value: 29 },
             { identifier: "bonus", points: 3, value: 3 }
           ]
         }
@@ -168,6 +170,7 @@ describe("FPL Normalizer", () => {
     assert.equal(stats.goals, 2);
     assert.equal(stats.assists, 1);
     assert.equal(stats.cleanSheet, false);
+    assert.equal(stats.bps, 29);
     assert.equal(stats.bonus, 3);
     assert.equal(stats.totalPoints, 16); // 2 + 8 + 3 + 3 = 16 (test logic is just sum of points)
   });

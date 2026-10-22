@@ -174,6 +174,7 @@ export interface Squad {
   players?: SquadPlayer[];
   chipUsages?: SquadChipUsage[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SquadPlayer {

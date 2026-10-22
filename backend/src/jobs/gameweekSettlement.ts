@@ -5,6 +5,7 @@ import { leagueService, LeagueService } from "../services/league/leagueService.j
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
+import { updateMatchRatings } from "../services/league/matchRatingService.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
 // settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
 // longer needs to know which services react to a gameweek update.
@@ -122,6 +123,8 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);
     }
   }
+
+  await updateMatchRatings(gameweekId);
 
   // Bulk-recalculate every CLASSIC league's standings in one pass across the
   // whole platform (see recalculateClassicStandings for why this replaced a

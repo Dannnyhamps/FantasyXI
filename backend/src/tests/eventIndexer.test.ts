@@ -11,7 +11,7 @@ import { MembershipStatus, PaymentStatus, TransactionStatus } from "../types/ind
 const LEAGUE_ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
 const participant = Keypair.random().publicKey();
 
-function depositEvent(txHash: string, ledger = 500, address = participant) {
+function depositEvent(txHash: string, ledger = 500, address = participant, amountStroops = 100_000_000n) {
   return {
     id: `${ledger}-1`,
     type: "contract",
@@ -27,7 +27,7 @@ function depositEvent(txHash: string, ledger = 500, address = participant) {
     ],
     value: nativeToScVal([
       nativeToScVal(address, { type: "address" }),
-      nativeToScVal(100_000_000n, { type: "i128" }),
+      nativeToScVal(amountStroops, { type: "i128" }),
     ]),
   } as any;
 }
@@ -99,6 +99,7 @@ function createMockDb(memberOverrides: any = {}) {
       id: LEAGUE_ID,
       creatorId: "creator_1",
       entryFee: 10,
+      maxMembers: 16,
       status: "ACTIVE",
     },
     member: {
@@ -113,6 +114,7 @@ function createMockDb(memberOverrides: any = {}) {
     },
     transactions: new Map<string, any>(),
     contractEvents: [] as any[],
+    depositExceptions: new Map<string, any>(),
   };
   const db: any = {
     state,
@@ -131,6 +133,7 @@ function createMockDb(memberOverrides: any = {}) {
       update: async ({ data }: any) => Object.assign(state.league, data),
     },
     leagueMember: {
+      count: async () => 1,
       findFirst: async ({ where }: any) => {
         const [byMember, byWallet] = where.OR;
         const m = state.member;
@@ -156,6 +159,14 @@ function createMockDb(memberOverrides: any = {}) {
       },
       findMany: async ({ where }: any) =>
         state.contractEvents.filter((e) => !where?.eventType || e.eventType === where.eventType),
+    },
+    depositException: {
+      upsert: async ({ where, create }: any) => {
+        const existing = state.depositExceptions.get(where.txHash);
+        const exception = existing ?? create;
+        state.depositExceptions.set(where.txHash, exception);
+        return exception;
+      },
     },
     $transaction: async (ops: any[]) => Promise.all(ops),
   };
@@ -224,6 +235,16 @@ describe("Soroban Escrow Event Indexer", () => {
 
     assert.equal(await indexer.handleEvent(depositEvent("d".repeat(64), 500, stranger)), false);
     assert.equal(db.state.transactions.size, 0);
+    assert.equal(db.state.depositExceptions.size, 1);
+  });
+
+  it("flags a mismatched amount instead of confirming the member", async () => {
+    const db = createMockDb();
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    assert.equal(await indexer.handleEvent(depositEvent("f".repeat(64), 500, participant, 50_000_000n)), false);
+    assert.equal(db.state.member.paymentStatus, PaymentStatus.PAYMENT_INITIATED);
+    assert.equal(db.state.depositExceptions.get("f".repeat(64)).reason, "AMOUNT_MISMATCH");
   });
 
   it("persists the cursor and resumes from it after a restart", async () => {

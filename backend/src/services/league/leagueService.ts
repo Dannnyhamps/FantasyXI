@@ -442,6 +442,18 @@ export class LeagueService {
       throw new LeagueValidationError("isPrivate must be a boolean");
     }
 
+    const payoutPreset = input.payoutPreset ?? "standard";
+    if (!["standard", "winner-takes-all", "top-five", "custom"].includes(payoutPreset)) {
+      throw new LeagueValidationError("Invalid payout preset");
+    }
+    if (payoutPreset === "custom") {
+      try {
+        PrizeService.validateSplits(input.customPrizeSplitsBps ?? []);
+      } catch (error) {
+        throw new LeagueValidationError(error instanceof Error ? error.message : "Invalid custom prize splits");
+      }
+    }
+
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
 
@@ -524,6 +536,8 @@ export class LeagueService {
           prizePool: prizeCalc.prizePool,
           status: LeagueStatus.UPCOMING,
           scoringType,
+          payoutPreset,
+          payoutSplitsBps: payoutPreset === "custom" ? input.customPrizeSplitsBps : [],
           isPrivate: input.isPrivate ?? false,
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,

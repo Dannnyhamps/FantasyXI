@@ -394,3 +394,255 @@ export async function getAffiliateDashboard(
   }
 }
 
+
+import { SorobanStateArchivalRecoveryService } from "../services/financial/sorobanStateArchivalRecovery.js";
+
+const storageRecoveryService = new SorobanStateArchivalRecoveryService();
+
+export async function getStorageRentStatus(
+import { disputeService } from "../services/financial/disputeService.js";
+import { createSettlementMerkleTree } from "../services/financial/settlementProof.js";
+
+export async function fileDisputeHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const { claimantAddress, reason, evidenceUrl } = req.body;
+
+    if (!claimantAddress || !reason) {
+      res.status(400).json({
+        success: false,
+        message: "claimantAddress and reason are required to file a dispute",
+      });
+      return;
+    }
+
+    const dispute = await disputeService.fileDispute({
+      leagueId,
+      claimantAddress,
+      reason,
+      evidenceUrl,
+      autoFreeze: req.body.autoFreeze !== false,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: dispute,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getLeagueDisputesHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const contractIds = req.query.contractId
+      ? [req.query.contractId as string]
+      : [];
+    const inspection = await storageRecoveryService.inspectContractEntries(contractIds);
+    const rentReserves = await storageRecoveryService.inspectRentReserves(
+      contractIds.length > 0
+        ? contractIds
+        : [process.env.STELLAR_ESCROW_CONTRACT_ID || ""]
+    );
+    res.json({
+      success: true,
+      data: {
+        currentLedger: inspection.currentLedger,
+        entries: inspection.entries,
+        rentReserves,
+        thresholds: {
+          warnThresholdLedgers: storageRecoveryService.warnThresholdLedgers,
+          restoreThresholdLedgers: storageRecoveryService.restoreThresholdLedgers,
+          extendTtlLedgers: storageRecoveryService.extendTtlLedgers,
+          minSafeBalanceStroops: storageRecoveryService.minSafeBalanceStroops.toString(),
+        },
+      },
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const disputes = await disputeService.getDisputesForLeague(leagueId);
+
+    res.status(200).json({
+      success: true,
+      data: disputes,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function addEvidenceHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { disputeId } = req.params;
+    const { submittedBy, description, evidenceUrl } = req.body;
+
+    if (!submittedBy || !description) {
+      res.status(400).json({
+        success: false,
+        message: "submittedBy and description are required",
+      });
+      return;
+    }
+
+    const updated = await disputeService.addEvidence(disputeId, {
+      submittedBy,
+      description,
+      evidenceUrl,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function resolveDisputePayoutHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { disputeId } = req.params;
+    const { winners, platformTreasury, platformFeeStroops, notes } = req.body;
+
+    if (!winners || !Array.isArray(winners) || !platformTreasury) {
+      res.status(400).json({
+        success: false,
+        message: "winners array and platformTreasury are required",
+      });
+      return;
+    }
+
+    const updated = await disputeService.resolveWithPayout(disputeId, {
+      winners,
+      platformTreasury,
+      platformFeeStroops: BigInt(platformFeeStroops ?? "0"),
+      notes,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function triggerStorageRentRecovery(
+export async function resolveDisputeRefundHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const adminSecret =
+      process.env.STELLAR_ADMIN_SECRET || (req.body.adminSecret as string);
+    if (!adminSecret) {
+      res.status(400).json({
+        success: false,
+        message: "No admin signing secret available to execute state recovery.",
+      });
+      return;
+    }
+    const contractIds = req.body.contractIds || [];
+    const report = await storageRecoveryService.runRecoveryCycle(
+      adminSecret,
+      contractIds
+    );
+    res.json({
+      success: true,
+      data: report,
+    const { disputeId } = req.params;
+    const { participants, notes } = req.body;
+
+    if (!participants || !Array.isArray(participants)) {
+      res.status(400).json({
+        success: false,
+        message: "participants array is required",
+      });
+      return;
+    }
+
+    const updated = await disputeService.resolveWithRefund(disputeId, {
+      participants,
+      notes,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function rejectDisputeHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { disputeId } = req.params;
+    const { notes } = req.body;
+
+    const updated = await disputeService.rejectDispute(disputeId, notes || "Dispute rejected by administrator");
+
+    res.status(200).json({
+      success: true,
+      data: updated,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function executeMerkleSettlementHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const plan = await financialService.getSettlementPlan(leagueId);
+
+    const merkleResult = createSettlementMerkleTree({
+      leagueId,
+      grossPool: plan.grossPool,
+      platformFee: plan.platformFee,
+      winners: plan.winners.map((w) => ({
+        rank: w.rank,
+        userId: w.userId,
+        stellarAddress: w.stellarAddress,
+        totalPoints: w.totalPoints,
+        prizeAmount: w.prizeAmount,
+      })),
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        leagueId,
+        merkleRoot: merkleResult.merkleRoot,
+        totalWinners: merkleResult.claimProofs.size,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+

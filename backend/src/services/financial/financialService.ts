@@ -769,7 +769,8 @@ export class FinancialService {
     // Calculate deterministic prize pool
     const distribution = PrizeService.calculatePrizeDistribution(
       paidMembers.length,
-      league.entryFee
+      league.entryFee,
+      { preset: PrizeService.parsePreset(league.payoutPreset ?? "standard"), customSplitsBps: league.payoutSplitsBps ?? [] }
     );
 
     // Sort participants deterministically by points descending, then join timestamp.
@@ -781,54 +782,30 @@ export class FinancialService {
     });
 
     const winners: SettlementWinner[] = [];
-    const hasFirstPlaceTie =
-      sortedMembers.length > 1 &&
-      (sortedMembers[0].squad?.totalPoints || 0) ===
-        (sortedMembers[1].squad?.totalPoints || 0);
-    const tiedFirstPrize = hasFirstPlaceTie
-      ? Math.floor((distribution.prizes.first + distribution.prizes.second) * 100 / 2) / 100
-      : distribution.prizes.first;
-    const tiedSecondPrize = hasFirstPlaceTie
-      ? distribution.prizes.first + distribution.prizes.second - tiedFirstPrize
-      : distribution.prizes.second;
-
-    // Winner 1 (or the deterministic first half of a tied first place).
-    if (sortedMembers[0] && distribution.prizes.first > 0) {
-      winners.push({
-        rank: 1,
-        userId: sortedMembers[0].userId,
-        username: sortedMembers[0].user?.username || "Unknown",
-        stellarAddress: sortedMembers[0].stellarAddress || "PENDING_WALLET_LINK",
-        squadName: sortedMembers[0].squad?.name || "Squad 1",
-        totalPoints: sortedMembers[0].squad?.totalPoints || 0,
-        prizeAmount: hasFirstPlaceTie ? tiedFirstPrize : distribution.prizes.first,
-      });
-    }
-
-    // Winner 2 (or the deterministic second half of a tied first place).
-    if (sortedMembers[1] && distribution.prizes.second > 0) {
-      winners.push({
-        rank: hasFirstPlaceTie ? 1 : 2,
-        userId: sortedMembers[1].userId,
-        username: sortedMembers[1].user?.username || "Unknown",
-        stellarAddress: sortedMembers[1].stellarAddress || "PENDING_WALLET_LINK",
-        squadName: sortedMembers[1].squad?.name || "Squad 2",
-        totalPoints: sortedMembers[1].squad?.totalPoints || 0,
-        prizeAmount: hasFirstPlaceTie ? tiedSecondPrize : distribution.prizes.second,
-      });
-    }
-
-    // Winner 3 (10% if 3+ players)
-    if (sortedMembers[2] && distribution.prizes.third > 0) {
-      winners.push({
-        rank: 3,
-        userId: sortedMembers[2].userId,
-        username: sortedMembers[2].user?.username || "Unknown",
-        stellarAddress: sortedMembers[2].stellarAddress || "PENDING_WALLET_LINK",
-        squadName: sortedMembers[2].squad?.name || "Squad 3",
-        totalPoints: sortedMembers[2].squad?.totalPoints || 0,
-        prizeAmount: distribution.prizes.third,
-      });
+    let rankOffset = 0;
+    while (rankOffset < Math.min(sortedMembers.length, distribution.payouts.length)) {
+      const points = sortedMembers[rankOffset].squad?.totalPoints || 0;
+      let groupEnd = rankOffset + 1;
+      while (groupEnd < sortedMembers.length && (sortedMembers[groupEnd].squad?.totalPoints || 0) === points) groupEnd++;
+      const group = sortedMembers.slice(rankOffset, groupEnd);
+      const pooledCents = distribution.payouts
+        .slice(rankOffset, Math.min(groupEnd, distribution.payouts.length))
+        .reduce((sum, value) => sum + Math.round(value * 100), 0);
+      const eachCents = Math.floor(pooledCents / group.length);
+      let remainder = pooledCents - eachCents * group.length;
+      for (const [offset, member] of group.entries()) {
+        const prizeCents = eachCents + (remainder-- > 0 ? 1 : 0);
+        if (prizeCents > 0) winners.push({
+          rank: rankOffset + 1,
+          userId: member.userId,
+          username: member.user?.username || "Unknown",
+          stellarAddress: member.stellarAddress || "PENDING_WALLET_LINK",
+          squadName: member.squad?.name || `Squad ${rankOffset + offset + 1}`,
+          totalPoints: points,
+          prizeAmount: prizeCents / 100,
+        });
+      }
+      rankOffset = groupEnd;
     }
 
     const proofHash = createSettlementProof({
@@ -854,6 +831,9 @@ export class FinancialService {
       platformFee: distribution.platformFee,
       netPrizePool: distribution.prizePool,
       winners,
+      ...(league.payoutPreset && league.payoutPreset !== "standard" && distribution.prizePool > 0 && winners.length > 0
+        ? { distributionBps: PrizeService.encodeSorobanPayoutAmounts(winners.map((winner) => winner.prizeAmount), distribution.prizePool) }
+        : {}),
       canSettle: true,
       proofHash,
     };
@@ -922,6 +902,7 @@ export class FinancialService {
           amount: toStroops(winner.prizeAmount).toString(),
         })),
         toStroops(plan.platformFee),
+        plan.distributionBps
         async (txHash: string, envelope: string) => {
           const attempt = await this.db.coordinatedTransaction.upsert({
             where: { settlementKey: leagueId },
