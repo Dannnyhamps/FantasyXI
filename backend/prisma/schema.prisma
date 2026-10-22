@@ -132,6 +132,7 @@ enum FinancialAuditAction {
   REFUND
   FEE_EXTRACTION
   PAYOUT_DEAD_LETTERED
+  PAYOUT_RETRY_SCHEDULED
   PAYOUT_RETRY_SUCCEEDED
   PAYOUT_RETRY_FAILED
   PAYOUT_DISCARDED
@@ -886,6 +887,10 @@ model FailedPayout {
   errorCode          Int?               @map("error_code")
   attempts           Int                @default(1)
   lastAttemptAt      DateTime           @default(now()) @map("last_attempt_at")
+  /// When this entry was scheduled for retry (distributed lock-free reprocessing)
+  retryScheduledAt   DateTime?          @map("retry_scheduled_at")
+  /// When this entry becomes eligible for retry (after backoff + jitter delay)
+  nextRetryAt        DateTime?          @map("next_retry_at")
   resolvedAt         DateTime?          @map("resolved_at")
   resolvedById       String?            @map("resolved_by_id")
   resolutionNote     String?            @map("resolution_note")
@@ -895,6 +900,7 @@ model FailedPayout {
 
   @@index([status])
   @@index([leagueId, status])
+  @@index([nextRetryAt])
   @@map("failed_payouts")
 }
 
