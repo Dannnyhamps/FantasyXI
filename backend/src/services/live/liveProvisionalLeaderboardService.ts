@@ -119,6 +119,11 @@ export interface LeagueRankDiffPayload {
   diffs: SquadRankDiff[];
 }
 
+export type LiveMatchEvent = LiveMatchPointEvent;
+export type LiveLeaderboardDeltaDiff = LeagueRankDiffPayload;
+export type ProvisionalSquadRecord = ProvisionalSquadRegistration;
+export type ProvisionalLeaderboardRankEntry = ProvisionalLeaderboardEntry;
+
 export interface IngestionStreamMetrics {
   eventsProcessed: number;
   squadsUpdated: number;

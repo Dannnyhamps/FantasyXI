@@ -207,7 +207,7 @@ function getFieldWeights(): FieldWeights {
   for (const [key, value] of Object.entries(envVars)) {
     if (key.startsWith("GQL_FIELD_WEIGHT_")) {
       const fieldPath = key.replace("GQL_FIELD_WEIGHT_", "");
-      const weight = parseInt(value, 10);
+      const weight = parseInt(value ?? "", 10);
       if (!isNaN(weight)) {
         fieldWeights[fieldPath] = weight;
       }

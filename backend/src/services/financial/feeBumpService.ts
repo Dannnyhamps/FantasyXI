@@ -197,7 +197,7 @@ export class FeeBumpService {
     return {
       feeBumpTx,
       bumpedFeeStroops: Number(feeBumpTx.fee),
-      innerTxHash: innerTx.hash().toString("hex"),
+      innerTxHash: Buffer.from(innerTx.hash()).toString("hex"),
     };
   }
 
@@ -218,7 +218,7 @@ export class FeeBumpService {
       logger.error({ account: this.sponsorshipKeypair.publicKey() }, msg);
       return {
         success: false,
-        innerTxHash: typeof innerTxInput === "string" ? "" : innerTxInput.hash().toString("hex"),
+        innerTxHash: typeof innerTxInput === "string" ? "" : Buffer.from(innerTxInput.hash()).toString("hex"),
         feeBumpTxHash: "",
         originalFeeStroops: 0,
         bumpedFeeStroops: 0,
@@ -234,7 +234,7 @@ export class FeeBumpService {
       const errorMsg = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        innerTxHash: typeof innerTxInput === "string" ? "" : innerTxInput.hash().toString("hex"),
+        innerTxHash: typeof innerTxInput === "string" ? "" : Buffer.from(innerTxInput.hash()).toString("hex"),
         feeBumpTxHash: "",
         originalFeeStroops: 0,
         bumpedFeeStroops: 0,
@@ -244,7 +244,7 @@ export class FeeBumpService {
     }
 
     const { feeBumpTx, bumpedFeeStroops, innerTxHash } = built;
-    const feeBumpTxHash = feeBumpTx.hash().toString("hex");
+    const feeBumpTxHash = Buffer.from(feeBumpTx.hash()).toString("hex");
     const originalFeeStroops = Number((feeBumpTx.innerTransaction as Transaction).fee);
 
     try {

@@ -72,7 +72,9 @@ class QueryComplexityCache {
     if (this.cache.size >= this.maxSize) {
       // Remove oldest (first) entry
       const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
     }
 
     this.cache.set(key, result);
@@ -378,19 +380,26 @@ function convertArgumentsToRecord(
  */
 function getArgumentValue(valueNode: any): unknown {
   switch (valueNode.kind) {
-    case Kind.INT_VALUE:
+    case Kind.INT:
+    case "IntValue":
       return parseInt(valueNode.value, 10);
-    case Kind.FLOAT_VALUE:
+    case Kind.FLOAT:
+    case "FloatValue":
       return parseFloat(valueNode.value);
-    case Kind.STRING_VALUE:
+    case Kind.STRING:
+    case "StringValue":
       return valueNode.value;
-    case Kind.BOOLEAN_VALUE:
+    case Kind.BOOLEAN:
+    case "BooleanValue":
       return valueNode.value;
-    case Kind.NULL_VALUE:
+    case Kind.NULL:
+    case "NullValue":
       return null;
-    case Kind.LIST_VALUE:
+    case Kind.LIST:
+    case "ListValue":
       return valueNode.values.map(getArgumentValue);
-    case Kind.OBJECT_VALUE:
+    case Kind.OBJECT:
+    case "ObjectValue":
       const obj: Record<string, unknown> = {};
       for (const objField of valueNode.fields) {
         obj[objField.name.value] = getArgumentValue(objField.value);

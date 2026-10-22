@@ -92,7 +92,7 @@ export function enforceTenanBoundary(
       // ================================================================
       // 2. Check if user is admin (admins can access any tenant)
       // ================================================================
-      if (req.user.role === UserRole.ADMIN || req.user.role === "ADMIN") {
+      if ((req.user.role as string) === UserRole.ADMIN || (req.user.role as string) === "ADMIN") {
         if (options.debug) {
           console.log(
             `[TenantBoundary] Admin user ${userId} accessing tenant ${tenantId}`

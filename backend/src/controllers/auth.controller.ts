@@ -612,12 +612,32 @@ export function getJwks(_req: Request, res: Response): void {
 
 import { sessionRegistryService } from "../services/auth/sessionRegistryService.js";
 
-export async function listActiveSessions(
 /**
  * POST /api/v1/auth/keys/:kid/revoke (issue #332)
  * Revokes a compromised signing key on every node. Body: { reason? }.
  */
 export async function revokeSigningKey(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const reason =
+      typeof req.body?.reason === "string" && req.body.reason.trim()
+        ? req.body.reason.trim().slice(0, 200)
+        : `revoked by ${req.user?.id ?? "unknown"}`;
+    const result = await jwtKeyRotationService.revoke(String(req.params.kid), reason);
+    if (!result) {
+      res.status(404).json({ success: false, message: "Signing key not found" });
+      return;
+    }
+    res.json({ success: true, message: "Signing key revoked", data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listActiveSessions(
   req: Request,
   res: Response,
   next: NextFunction
@@ -728,16 +748,6 @@ export async function streamSessionEvents(
     req.on("close", () => {
       unsubscribe();
     });
-    const reason =
-      typeof req.body?.reason === "string" && req.body.reason.trim()
-        ? req.body.reason.trim().slice(0, 200)
-        : `revoked by ${req.user?.id ?? "unknown"}`;
-    const result = await jwtKeyRotationService.revoke(String(req.params.kid), reason);
-    if (!result) {
-      res.status(404).json({ success: false, message: "Signing key not found" });
-      return;
-    }
-    res.json({ success: true, message: "Signing key revoked", data: result });
   } catch (error) {
     next(error);
   }

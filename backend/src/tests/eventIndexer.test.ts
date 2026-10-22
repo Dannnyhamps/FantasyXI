@@ -213,6 +213,7 @@ function createMockRedis() {
       }
       return deleted;
     },
+    keys: async () => Array.from(kv.keys()),
     eval: async () => 1,
   };
 }

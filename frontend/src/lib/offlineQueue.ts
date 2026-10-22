@@ -14,7 +14,6 @@
 
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError } from "@/lib/offlineStore";
-import { ApiError, api } from "@/lib/api";
 
 export const DB_NAME = "fantasyxi-offline-queue";
 export const DB_VERSION = 1;
@@ -316,6 +315,7 @@ export async function enqueueSquadMutation(data: {
       userId: data.userId ?? null,
       action: data.action ?? (data.squadId ? "update" : "create"),
       payload: data.payload,
+      baseRevision: conflicting?.baseRevision ?? data.baseRevision,
       timestamp: Date.now(),
       seq: existingMutations.reduce((max, m) => Math.max(max, m.seq ?? 0), 0) + 1,
       retryCount: 0,
@@ -325,26 +325,6 @@ export async function enqueueSquadMutation(data: {
     await storage.put(queued);
     return queued;
   }))!;
-  const storage = getQueueStorage();
-  const existingMutations = await storage.getAll();
-
-  const conflicting = existingMutations.find(
-    (m) => m.status === "pending" && detectMutationConflict(m, data)
-  );
-
-  const mutation: QueuedSquadMutation = {
-    id: conflicting ? conflicting.id : `mut_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    squadId: data.squadId ?? null,
-    userId: data.userId ?? null,
-    action: data.action ?? (data.squadId ? "update" : "create"),
-    payload: data.payload,
-    baseRevision: conflicting?.baseRevision ?? data.baseRevision,
-    timestamp: Date.now(),
-    retryCount: 0,
-    status: "pending",
-  };
-
-  await storage.put(mutation);
   notifyQueueChange();
 
   // Attempt to register background sync with the service worker
@@ -495,12 +475,6 @@ function rejectionReason(error: unknown): RejectionReason {
   if (error.status === 404) return "NOT_FOUND";
   return "REJECTED";
 }
-  const result: SyncResult = {
-    succeeded: 0,
-    failed: 0,
-    syncedIds: [],
-    conflicts: [],
-  };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Network error during squad sync";
@@ -528,7 +502,14 @@ async function releaseMutation(mutation: QueuedSquadMutation): Promise<void> {
  * concurrent call returns immediately with `halted: "busy"`.
  */
 export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> {
-  const result: SyncResult = { succeeded: 0, failed: 0, syncedIds: [], rejected: [], halted: null };
+  const result: SyncResult = {
+    succeeded: 0,
+    failed: 0,
+    syncedIds: [],
+    rejected: [],
+    halted: null,
+    conflicts: [],
+  };
   const flushed = await runExclusive(FLUSH_LOCK, () => flushQueue(apiClient, result), { ifAvailable: true });
   if (flushed === null) result.halted = "busy";
   notifyQueueChange();

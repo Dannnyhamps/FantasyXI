@@ -396,12 +396,73 @@ export async function getAffiliateDashboard(
 
 
 import { SorobanStateArchivalRecoveryService } from "../services/financial/sorobanStateArchivalRecovery.js";
+import { disputeService } from "../services/financial/disputeService.js";
+import { createSettlementMerkleTree } from "../services/financial/settlementProof.js";
 
 const storageRecoveryService = new SorobanStateArchivalRecoveryService();
 
 export async function getStorageRentStatus(
-import { disputeService } from "../services/financial/disputeService.js";
-import { createSettlementMerkleTree } from "../services/financial/settlementProof.js";
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const contractIds = req.query.contractId
+      ? [req.query.contractId as string]
+      : [];
+    const inspection = await storageRecoveryService.inspectContractEntries(contractIds);
+    const rentReserves = await storageRecoveryService.inspectRentReserves(
+      contractIds.length > 0
+        ? contractIds
+        : [process.env.STELLAR_ESCROW_CONTRACT_ID || ""]
+    );
+    res.json({
+      success: true,
+      data: {
+        currentLedger: inspection.currentLedger,
+        entries: inspection.entries,
+        rentReserves,
+        thresholds: {
+          warnThresholdLedgers: storageRecoveryService.warnThresholdLedgers,
+          restoreThresholdLedgers: storageRecoveryService.restoreThresholdLedgers,
+          extendTtlLedgers: storageRecoveryService.extendTtlLedgers,
+          minSafeBalanceStroops: storageRecoveryService.minSafeBalanceStroops.toString(),
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function triggerStorageRentRecovery(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const adminSecret =
+      process.env.STELLAR_ADMIN_SECRET || (req.body.adminSecret as string);
+    if (!adminSecret) {
+      res.status(400).json({
+        success: false,
+        message: "No admin signing secret available to execute state recovery.",
+      });
+      return;
+    }
+    const contractIds = req.body.contractIds || [];
+    const report = await storageRecoveryService.runRecoveryCycle(
+      adminSecret,
+      contractIds
+    );
+    res.json({
+      success: true,
+      data: report,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 export async function fileDisputeHandler(
   req: Request,
@@ -443,28 +504,6 @@ export async function getLeagueDisputesHandler(
   next: NextFunction
 ): Promise<void> {
   try {
-    const contractIds = req.query.contractId
-      ? [req.query.contractId as string]
-      : [];
-    const inspection = await storageRecoveryService.inspectContractEntries(contractIds);
-    const rentReserves = await storageRecoveryService.inspectRentReserves(
-      contractIds.length > 0
-        ? contractIds
-        : [process.env.STELLAR_ESCROW_CONTRACT_ID || ""]
-    );
-    res.json({
-      success: true,
-      data: {
-        currentLedger: inspection.currentLedger,
-        entries: inspection.entries,
-        rentReserves,
-        thresholds: {
-          warnThresholdLedgers: storageRecoveryService.warnThresholdLedgers,
-          restoreThresholdLedgers: storageRecoveryService.restoreThresholdLedgers,
-          extendTtlLedgers: storageRecoveryService.extendTtlLedgers,
-          minSafeBalanceStroops: storageRecoveryService.minSafeBalanceStroops.toString(),
-        },
-      },
     const leagueId = (req.params.leagueId || req.params.id) as string;
     const disputes = await disputeService.getDisputesForLeague(leagueId);
 
@@ -494,7 +533,7 @@ export async function addEvidenceHandler(
       return;
     }
 
-    const updated = await disputeService.addEvidence(disputeId, {
+    const updated = await disputeService.addEvidence(disputeId as string, {
       submittedBy,
       description,
       evidenceUrl,
@@ -526,7 +565,7 @@ export async function resolveDisputePayoutHandler(
       return;
     }
 
-    const updated = await disputeService.resolveWithPayout(disputeId, {
+    const updated = await disputeService.resolveWithPayout(disputeId as string, {
       winners,
       platformTreasury,
       platformFeeStroops: BigInt(platformFeeStroops ?? "0"),
@@ -542,30 +581,12 @@ export async function resolveDisputePayoutHandler(
   }
 }
 
-export async function triggerStorageRentRecovery(
 export async function resolveDisputeRefundHandler(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const adminSecret =
-      process.env.STELLAR_ADMIN_SECRET || (req.body.adminSecret as string);
-    if (!adminSecret) {
-      res.status(400).json({
-        success: false,
-        message: "No admin signing secret available to execute state recovery.",
-      });
-      return;
-    }
-    const contractIds = req.body.contractIds || [];
-    const report = await storageRecoveryService.runRecoveryCycle(
-      adminSecret,
-      contractIds
-    );
-    res.json({
-      success: true,
-      data: report,
     const { disputeId } = req.params;
     const { participants, notes } = req.body;
 
@@ -577,7 +598,7 @@ export async function resolveDisputeRefundHandler(
       return;
     }
 
-    const updated = await disputeService.resolveWithRefund(disputeId, {
+    const updated = await disputeService.resolveWithRefund(disputeId as string, {
       participants,
       notes,
     });
@@ -600,7 +621,7 @@ export async function rejectDisputeHandler(
     const { disputeId } = req.params;
     const { notes } = req.body;
 
-    const updated = await disputeService.rejectDispute(disputeId, notes || "Dispute rejected by administrator");
+    const updated = await disputeService.rejectDispute(disputeId as string, notes || "Dispute rejected by administrator");
 
     res.status(200).json({
       success: true,
@@ -618,13 +639,13 @@ export async function executeMerkleSettlementHandler(
 ): Promise<void> {
   try {
     const leagueId = (req.params.leagueId || req.params.id) as string;
-    const plan = await financialService.getSettlementPlan(leagueId);
+    const plan = await financialService.prepareSettlement(leagueId);
 
     const merkleResult = createSettlementMerkleTree({
       leagueId,
       grossPool: plan.grossPool,
       platformFee: plan.platformFee,
-      winners: plan.winners.map((w) => ({
+      winners: plan.winners.map((w: any) => ({
         rank: w.rank,
         userId: w.userId,
         stellarAddress: w.stellarAddress,

@@ -312,7 +312,6 @@ export class XGXPForecastService {
           where: {
             isAvailable: true, // Only forecast available players
           },
-          include: { team: true },
           select: {
             id: true,
             fplId: true,
