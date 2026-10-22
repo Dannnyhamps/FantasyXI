@@ -1,9 +1,11 @@
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import {
   LeagueStatus,
   MembershipStatus,
   PaymentStatus,
+  Position,
   ScoringType,
   CreateLeagueInput,
   LeagueStandingsEntry,
@@ -11,6 +13,40 @@ import {
 } from "../../types/index.js";
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
+import {
+  parseLeagueScoringConfig,
+  resolveLeagueScoringConfig,
+} from "../../models/leagueScoringConfig.js";
+import type { LeagueScoringConfig } from "../../models/leagueScoringConfig.js";
+
+function scoringConfigToJson(config: LeagueScoringConfig): Prisma.InputJsonObject {
+  const positionWeights = (
+    weights: Record<Position, number>
+  ): Record<string, number> => ({
+    [Position.GKP]: weights[Position.GKP],
+    [Position.DEF]: weights[Position.DEF],
+    [Position.MID]: weights[Position.MID],
+    [Position.FWD]: weights[Position.FWD],
+  });
+  return {
+    version: config.version,
+    appearance: {
+      underSixtyMinutes: config.appearance.underSixtyMinutes,
+      sixtyOrMoreMinutes: config.appearance.sixtyOrMoreMinutes,
+    },
+    goals: positionWeights(config.goals),
+    assists: config.assists,
+    cleanSheets: positionWeights(config.cleanSheets),
+    goalsConcededPerTwo: positionWeights(config.goalsConcededPerTwo),
+    savesPerThree: config.savesPerThree,
+    penaltySaves: config.penaltySaves,
+    penaltyMisses: config.penaltyMisses,
+    yellowCards: config.yellowCards,
+    redCards: config.redCards,
+    ownGoals: config.ownGoals,
+    bonus: config.bonus,
+  };
+}
 
 /** A scheduled H2H pairing. awayMemberId null = the league 'Average' team. */
 export interface H2HPairing {
@@ -68,6 +104,17 @@ export class LeagueService {
     const scoringType = input.scoringType ?? ScoringType.CLASSIC;
     if (!Object.values(ScoringType).includes(scoringType)) {
       throw new LeagueValidationError(`Invalid scoring type: ${scoringType}`);
+    }
+    let scoringConfig;
+    try {
+      scoringConfig = resolveLeagueScoringConfig({
+        scoringConfig: input.scoringConfig,
+        scoringPreset: input.scoringPreset,
+      });
+    } catch (error) {
+      throw new LeagueValidationError(
+        error instanceof Error ? error.message : "Invalid scoring configuration"
+      );
     }
 
     const maxMembers = input.maxMembers ?? 20;
@@ -150,6 +197,9 @@ export class LeagueService {
           prizePool: prizeCalc.prizePool,
           status: LeagueStatus.UPCOMING,
           scoringType,
+          ...(scoringConfig
+            ? { scoringConfig: scoringConfigToJson(scoringConfig) }
+            : {}),
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,
         },
@@ -314,19 +364,35 @@ export class LeagueService {
 
     const squadIds = league.members.map((m) => m.squadId);
 
-    // Fetch all gameweek scores within the competition window [startGameweekId, endGameweekId]
-    const gameweekScores = await prisma.squadGameweekScore.findMany({
-      where: {
-        squadId: { in: squadIds },
-        gameweekId: {
-          gte: league.startGameweekId,
-          lte: league.endGameweekId,
-        },
-      },
-      include: {
-        gameweek: { select: { id: true, name: true } },
-      },
-    });
+    const scoringConfig = league.scoringConfig
+      ? parseLeagueScoringConfig(league.scoringConfig)
+      : null;
+    const gameweekScores = scoringConfig
+      ? await prisma.leagueGameweekScore.findMany({
+          where: {
+            leagueId,
+            squadId: { in: squadIds },
+            gameweekId: {
+              gte: league.startGameweekId,
+              lte: league.endGameweekId,
+            },
+          },
+          include: {
+            gameweek: { select: { id: true, name: true } },
+          },
+        })
+      : await prisma.squadGameweekScore.findMany({
+          where: {
+            squadId: { in: squadIds },
+            gameweekId: {
+              gte: league.startGameweekId,
+              lte: league.endGameweekId,
+            },
+          },
+          include: {
+            gameweek: { select: { id: true, name: true } },
+          },
+        });
 
     // Group scores by squadId
     const scoresBySquad = new Map<
@@ -581,7 +647,11 @@ export class LeagueService {
    * updates member H2H statistics and refreshes table ranks.
    * The 'Average' team scores the rounded mean of all active members that gameweek.
    */
-  public async settleH2HGameweek(leagueId: string, gameweekId: number) {
+  public async settleH2HGameweek(
+    leagueId: string,
+    gameweekId: number,
+    useLeagueScoring = false
+  ) {
     const fixtures = await this.db.leagueFixture.findMany({
       where: { leagueId, gameweekId, isFinished: false },
     });
@@ -592,9 +662,20 @@ export class LeagueService {
     const members = await this.db.leagueMember.findMany({
       where: { leagueId, status: MembershipStatus.ACTIVE },
     });
-    const scores = await this.db.squadGameweekScore.findMany({
-      where: { gameweekId, squadId: { in: members.map((m: any) => m.squadId) } },
-    });
+    const scores = useLeagueScoring
+      ? await this.db.leagueGameweekScore.findMany({
+          where: {
+            leagueId,
+            gameweekId,
+            squadId: { in: members.map((m: any) => m.squadId) },
+          },
+        })
+      : await this.db.squadGameweekScore.findMany({
+          where: {
+            gameweekId,
+            squadId: { in: members.map((m: any) => m.squadId) },
+          },
+        });
 
     const pointsBySquad = new Map<string, number>(
       scores.map((s: any) => [s.squadId, s.points])

@@ -1,9 +1,15 @@
 import { prisma } from "../config/db.js";
-import { ChipType, LeagueStatus, ScoringType } from "../types/index.js";
+import {
+  ChipType,
+  LeagueStatus,
+  MembershipStatus,
+  ScoringType,
+} from "../types/index.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
 import { scoringService } from "../services/scoring/scoringService.js";
 import { squadService } from "../services/squad/squadService.js";
 import { leagueService } from "../services/league/leagueService.js";
+import { parseLeagueScoringConfig } from "../models/leagueScoringConfig.js";
 
 /**
  * A gameweek can be settled once all its fixtures are finished.
@@ -31,14 +37,6 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
     await scoringService.calculateAndPersistSquadScore(squad.id, gameweekId);
   }
 
-  const freeHits = await prisma.squadChipUsage.findMany({
-    where: { gameweekId, chipType: ChipType.FREE_HIT, revertedAt: null },
-    select: { squadId: true },
-  });
-  for (const usage of freeHits) {
-    await squadService.revertFreeHit(usage.squadId, gameweekId);
-  }
-
   const leagues = await prisma.league.findMany({
     where: {
       status: LeagueStatus.ACTIVE,
@@ -47,8 +45,44 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
     },
   });
   for (const league of leagues) {
+    const scoringConfig = league.scoringConfig
+      ? parseLeagueScoringConfig(league.scoringConfig)
+      : null;
+    if (!scoringConfig) {
+      continue;
+    }
+    const members = await prisma.leagueMember.findMany({
+      where: { leagueId: league.id, status: MembershipStatus.ACTIVE },
+      select: { squadId: true },
+    });
+    await Promise.all(
+      members.map((member) =>
+        scoringService.calculateAndPersistLeagueScore(
+          league.id,
+          member.squadId,
+          gameweekId,
+          scoringConfig
+        )
+      )
+    );
+  }
+
+  const freeHits = await prisma.squadChipUsage.findMany({
+    where: { gameweekId, chipType: ChipType.FREE_HIT, revertedAt: null },
+    select: { squadId: true },
+  });
+  for (const usage of freeHits) {
+    await squadService.revertFreeHit(usage.squadId, gameweekId);
+  }
+
+  for (const league of leagues) {
+    const hasCustomScoring = league.scoringConfig !== null;
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
-      await leagueService.settleH2HGameweek(league.id, gameweekId);
+      await leagueService.settleH2HGameweek(
+        league.id,
+        gameweekId,
+        hasCustomScoring
+      );
     }
     if (league.endGameweekId === gameweekId) {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);

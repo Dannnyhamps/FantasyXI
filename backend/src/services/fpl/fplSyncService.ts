@@ -388,6 +388,10 @@ export class FplSyncService {
           yellowCards: s.yellowCards,
           redCards: s.redCards,
           saves: s.saves,
+          goalsConceded: s.goalsConceded,
+          ownGoals: s.ownGoals,
+          penaltiesSaved: s.penaltiesSaved,
+          penaltiesMissed: s.penaltiesMissed,
           bonus: s.bonus,
           totalPoints: s.totalPoints,
         })
@@ -412,6 +416,10 @@ export class FplSyncService {
         yellowCards: stats.yellowCards,
         redCards: stats.redCards,
         saves: stats.saves,
+        goalsConceded: stats.goalsConceded,
+        ownGoals: stats.ownGoals,
+        penaltiesSaved: stats.penaltiesSaved,
+        penaltiesMissed: stats.penaltiesMissed,
         bonus: stats.bonus,
         totalPoints: stats.totalPoints,
       };

@@ -23,6 +23,10 @@ import {
   ChipType,
   UserRole,
 } from "@prisma/client";
+import type {
+  LeagueScoringConfig,
+  ScoringPreset,
+} from "../models/leagueScoringConfig.js";
 
 export {
   Position,
@@ -220,6 +224,8 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  scoringConfig?: LeagueScoringConfig;
+  scoringPreset?: ScoringPreset;
 }
 
 export interface JoinLeagueInput {
@@ -346,7 +352,6 @@ export interface ReconciliationReport {
     confirmedAt: Date | null;
   }>;
 }
-
 
 
 
