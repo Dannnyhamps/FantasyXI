@@ -338,7 +338,7 @@ npm run build
 - **Non-Custodial Architecture**: FantasyXI never takes possession or custody of user stablecoins. Funds reside exclusively in the open-source Soroban smart contract escrow partition until settlement.
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
-- **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
+- **Rate Limiting & Authentication**: Public API traffic uses an atomic Redis sliding-window limiter with per-route-group anonymous, authenticated-user, and webhook tiers. Configure `RATE_LIMIT_REDIS_URL` (or `REDIS_URL`) for shared limits across instances; while Redis is unavailable, a bounded conservative in-process limiter is used. Route thresholds and windows are defined in `backend/src/config/rateLimit.ts`. The higher webhook tier is enabled only on webhook paths when `WEBHOOK_RATE_LIMIT_SECRET` matches the `X-Webhook-Secret` header. Authentication endpoints retain a separate strict IP limiter.
 - Consult [`REGULATORY_CONSIDERATIONS.md`](file:///c:/ReactApps/FantasyXI/REGULATORY_CONSIDERATIONS.md) for legal classifications, skill-game exemptions, and AML operational considerations.
 
 ---

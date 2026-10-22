@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { optionalAuth } from "./middleware/authMiddleware.js";
 
 dotenv.config();
 
@@ -22,8 +23,9 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(optionalAuth);
 app.use(apiRateLimiter);
+app.use(express.json());
 
 // ============================================================
 // Routes

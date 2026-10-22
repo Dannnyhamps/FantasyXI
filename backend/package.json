@@ -29,6 +29,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
     "google-auth-library": "^11.0.2",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg-boss": "^10.4.2"
   },
