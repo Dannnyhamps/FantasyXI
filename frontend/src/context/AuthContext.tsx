@@ -1,8 +1,9 @@
+"use client";
+
 import {
   broadcastSessionRevocation,
   useCrossTabSessionSync,
 } from "@/hooks/useCrossTabSessionSync";
-"use client";
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { User, AuthResponse, ApiSuccessResponse } from "@/types";

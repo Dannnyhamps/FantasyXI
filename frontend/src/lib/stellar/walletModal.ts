@@ -34,7 +34,7 @@ import {
   LedgerDeviceLockedError,
   LedgerAppNotOpenError,
   LedgerDeviceDisconnectedError,
-} from "./ledgerAdapter.js";
+} from "./ledgerAdapter";
 
 export type SupportedSoftwareWalletId = "freighter" | "albedo" | "xbull" | "hana";
 export type SupportedHardwareWalletId = "ledger";
