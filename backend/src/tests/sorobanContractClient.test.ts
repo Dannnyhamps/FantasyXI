@@ -10,6 +10,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { SorobanContractClient } from "../services/financial/sorobanContractClient.js";
+import { MemorySorobanReplayStore } from "./helpers/sorobanReplayStore.js";
 
 const CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32, 7));
 const admin = Keypair.random();
@@ -34,12 +35,19 @@ function createMockServer(simulations: any[]) {
     simulateTransaction: async () => simulations[calls.simulate++],
     sendTransaction: async (tx: any) => {
       calls.send.push(tx.operations[0].type);
-      return { status: "PENDING", hash: `${calls.send.length}`.repeat(64) };
+      return { status: "PENDING", hash: Buffer.from(tx.hash()).toString("hex") };
     },
     getTransaction: async () =>
       ++calls.getTransaction % 2 === 1
-        ? { status: rpc.Api.GetTransactionStatus.NOT_FOUND }
-        : { status: rpc.Api.GetTransactionStatus.SUCCESS, returnValue: nativeToScVal(42, { type: "u32" }) },
+        ? {
+            status: rpc.Api.GetTransactionStatus.NOT_FOUND,
+            latestLedgerCloseTime: Math.floor(Date.now() / 1000),
+          }
+        : {
+            status: rpc.Api.GetTransactionStatus.SUCCESS,
+            ledger: 101,
+            returnValue: nativeToScVal(42, { type: "u32" }),
+          },
   };
   return server;
 }
@@ -50,6 +58,7 @@ function createClient(server: any) {
     escrowContractId: CONTRACT_ID,
     usdcContractId: CONTRACT_ID,
     pollIntervalMs: 1,
+    replayStore: new MemorySorobanReplayStore(),
   });
 }
 
@@ -59,9 +68,9 @@ describe("SorobanContractClient RPC pipeline", () => {
     const res = await createClient(server).createLeague(admin.secret(), admin.publicKey(), 7, 10n);
 
     assert.equal(res.success, true);
-    assert.equal(res.txHash, "1".repeat(64));
+    assert.equal(res.txHash?.length, 64);
     assert.equal(res.returnValue, 42);
-    assert.deepEqual(server.calls.send, ["invokeHostFunction"]);
+    assert.deepEqual(server.calls.send, ["invokeHostFunction", "invokeHostFunction"]);
     assert.equal(server.calls.getTransaction, 2);
   });
 
@@ -74,7 +83,12 @@ describe("SorobanContractClient RPC pipeline", () => {
     const res = await createClient(server).deposit(admin.secret(), admin.publicKey(), 7);
 
     assert.equal(res.success, true);
-    assert.deepEqual(server.calls.send, ["restoreFootprint", "invokeHostFunction"]);
+    assert.deepEqual(server.calls.send, [
+      "restoreFootprint",
+      "restoreFootprint",
+      "invokeHostFunction",
+      "invokeHostFunction",
+    ]);
     assert.equal(server.calls.simulate, 2);
   });
 

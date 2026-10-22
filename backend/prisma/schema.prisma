@@ -88,6 +88,15 @@ enum TransactionStatus {
   FAILED
 }
 
+/// Durable state of a Soroban transaction submission and replay attempt.
+enum SorobanSubmissionStatus {
+  PENDING_VERIFICATION
+  SUBMITTED
+  SUCCESS
+  FAILED
+  DROPPED
+}
+
 // ============================================================
 // MODELS
 // ============================================================
@@ -441,6 +450,47 @@ model Transaction {
   // A batched refund shares one Stellar hash across several members
   @@unique([stellarTxHash, memberId])
   @@map("transactions")
+}
+
+/// Persists the exact signed envelope so a timeout can be reconciled and
+/// replayed idempotently without retaining the signing key.
+model SorobanTransactionSubmission {
+  id                 String                  @id @default(uuid())
+  txHash             String                  @unique @map("tx_hash")
+  sourceAccount      String                  @map("source_account")
+  sequence           BigInt
+  signedEnvelope     String                  @db.Text @map("signed_envelope")
+  status             SorobanSubmissionStatus @default(PENDING_VERIFICATION)
+  attemptCount       Int                     @default(0) @map("attempt_count")
+  lastAttemptAt      DateTime?               @map("last_attempt_at")
+  nextAttemptAt      DateTime                @default(now()) @map("next_attempt_at")
+  lastPolledAt       DateTime?               @map("last_polled_at")
+  ledgerSeq          Int?                    @map("ledger_seq")
+  lastError          String?                 @map("last_error")
+  leaseExpiresAt     DateTime?               @map("lease_expires_at")
+  createdAt          DateTime                @default(now()) @map("created_at")
+  updatedAt          DateTime                @updatedAt @map("updated_at")
+
+  transitions SorobanTransactionTransition[]
+
+  @@unique([sourceAccount, sequence])
+  @@index([status, nextAttemptAt])
+  @@map("soroban_transaction_submissions")
+}
+
+/// Append-only history of replay queue status changes.
+model SorobanTransactionTransition {
+  id           Int                     @id @default(autoincrement())
+  submissionId String                  @map("submission_id")
+  fromStatus   SorobanSubmissionStatus? @map("from_status")
+  toStatus     SorobanSubmissionStatus @map("to_status")
+  reason       String?
+  createdAt    DateTime                @default(now()) @map("created_at")
+
+  submission SorobanTransactionSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId, createdAt])
+  @@map("soroban_transaction_transitions")
 }
 
 /// A chip played by a squad for a gameweek.

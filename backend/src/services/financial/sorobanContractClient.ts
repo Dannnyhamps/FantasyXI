@@ -30,6 +30,10 @@ import {
   xdr,
   type Transaction,
 } from "@stellar/stellar-sdk";
+import {
+  SorobanTransactionReplayQueue,
+  type SorobanReplayStore,
+} from "./sorobanTransactionReplayQueue.js";
 
 // Load testnet deployment configuration
 const envTestnetPath = path.resolve(process.cwd(), ".env.testnet.local");
@@ -59,6 +63,10 @@ export interface InvocationResult {
   returnValue?: unknown;
   error?: string;
   contractErrorCode?: number;
+  submissionStatus?: string;
+  sequence?: string;
+  pendingVerification?: boolean;
+  dropped?: boolean;
 }
 
 export class SorobanContractClient {
@@ -68,6 +76,7 @@ export class SorobanContractClient {
   private usdcContractId: string;
   private pollIntervalMs: number;
   private maxPollAttempts: number;
+  private replayQueue: SorobanTransactionReplayQueue;
 
   constructor(options?: {
     rpcUrl?: string;
@@ -77,6 +86,8 @@ export class SorobanContractClient {
     server?: rpc.Server;
     pollIntervalMs?: number;
     maxPollAttempts?: number;
+    replayQueue?: SorobanTransactionReplayQueue;
+    replayStore?: SorobanReplayStore;
   }) {
     const rpcUrl =
       options?.rpcUrl ||
@@ -96,7 +107,16 @@ export class SorobanContractClient {
       process.env.STELLAR_USDC_TOKEN_CONTRACT_ID ||
       "";
     this.pollIntervalMs = options?.pollIntervalMs ?? 1000;
-    this.maxPollAttempts = options?.maxPollAttempts ?? 30;
+    this.maxPollAttempts = options?.maxPollAttempts ?? 5;
+    this.replayQueue =
+      options?.replayQueue ??
+      new SorobanTransactionReplayQueue({
+        server: this.server,
+        store: options?.replayStore,
+        networkPassphrase: this.networkPassphrase,
+        pollIntervalMs: this.pollIntervalMs,
+        maxPollAttempts: this.maxPollAttempts,
+      });
 
     if (!this.escrowContractId) {
       throw new Error("STELLAR_ESCROW_CONTRACT_ID not provided or set in environment.");
@@ -148,33 +168,20 @@ export class SorobanContractClient {
    * Submits a signed transaction and polls until it is final.
    */
   private async sendAndPoll(tx: Transaction): Promise<InvocationResult> {
-    const sent = await this.server.sendTransaction(tx);
-    if (sent.status === "ERROR" || sent.status === "DUPLICATE") {
-      return this.failure(
-        `Transaction rejected (${sent.status}): ${sent.errorResult?.toXDR("base64") ?? "unknown"}`,
-        sent.hash
-      );
-    }
-
-    for (let attempt = 0; attempt < this.maxPollAttempts; attempt++) {
-      const result = await this.server.getTransaction(sent.hash);
-      if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
-        return {
-          success: true,
-          txHash: sent.hash,
-          returnValue: result.returnValue ? scValToNative(result.returnValue) : undefined,
-        };
-      }
-      if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
-        return this.failure(
-          `Transaction failed: ${result.resultXdr.toXDR("base64")}`,
-          sent.hash
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
-    }
-
-    return this.failure(`Transaction ${sent.hash} not confirmed in time`, sent.hash);
+    const result = await this.replayQueue.submit(tx);
+    return {
+      success: result.success,
+      txHash: result.txHash,
+      returnValue: result.returnValue,
+      error: result.error,
+      contractErrorCode: result.error
+        ? SorobanContractClient.parseContractErrorCode(result.error)
+        : undefined,
+      submissionStatus: result.status,
+      sequence: result.sequence,
+      pendingVerification: result.pendingVerification,
+      dropped: result.dropped,
+    };
   }
 
   /**
@@ -220,7 +227,16 @@ export class SorobanContractClient {
       if (rpc.Api.isSimulationRestore(simulation)) {
         const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
         if (!restored.success) {
-          return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+          return {
+            ...this.failure(
+              `Footprint restoration failed: ${restored.error}`,
+              restored.txHash
+            ),
+            submissionStatus: restored.submissionStatus,
+            sequence: restored.sequence,
+            pendingVerification: restored.pendingVerification,
+            dropped: restored.dropped,
+          };
         }
         account = await this.server.getAccount(keypair.publicKey());
         tx = this.buildInvocation(account, contractId, method, args);
