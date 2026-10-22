@@ -391,6 +391,30 @@ export class SorobanContractClient {
   }
 
   /**
+   * Audit reads must distinguish an RPC failure from a genuine zero balance.
+   */
+  public async getLeagueForAudit(
+    leagueId: number | bigint
+  ): Promise<OnChainLeagueState | null> {
+    const result = await this.simulateView(this.escrowContractId, "get_league", [
+      SorobanContractClient.u64(leagueId),
+    ]);
+    if (!result.success) {
+      throw new Error(`Unable to audit escrow league ${leagueId}: ${result.error ?? "unknown RPC error"}`);
+    }
+    if (!result.returnValue) return null;
+
+    const state = result.returnValue as Record<string, unknown>;
+    return {
+      creator: String(state.creator),
+      entry_fee: BigInt(state.entry_fee as bigint),
+      participant_count: Number(state.participant_count),
+      status: Number(state.status),
+      total_deposited: BigInt(state.total_deposited as bigint),
+    };
+  }
+
+  /**
    * Query on-chain participant deposit amount.
    */
   public async getDeposit(
@@ -404,6 +428,23 @@ export class SorobanContractClient {
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;
   }
 
+  public async getDepositForAudit(
+    leagueId: number | bigint,
+    participantPublic: string
+  ): Promise<bigint> {
+    const result = await this.simulateView(this.escrowContractId, "get_deposit", [
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.address(participantPublic),
+    ]);
+    if (!result.success) {
+      throw new Error(`Unable to audit deposit for league ${leagueId}: ${result.error ?? "unknown RPC error"}`);
+    }
+    if (result.returnValue === undefined || result.returnValue === null) {
+      throw new Error(`Soroban returned no deposit value for league ${leagueId}`);
+    }
+    return BigInt((result.returnValue as bigint) ?? 0);
+  }
+
   /**
    * Query USDC SAC balance for any account (or contract ID).
    */
@@ -412,5 +453,18 @@ export class SorobanContractClient {
       SorobanContractClient.address(addressOrContractId),
     ]);
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;
+  }
+
+  public async getTokenBalanceForAudit(addressOrContractId: string): Promise<bigint> {
+    const result = await this.simulateView(this.usdcContractId, "balance", [
+      SorobanContractClient.address(addressOrContractId),
+    ]);
+    if (!result.success) {
+      throw new Error(`Unable to audit token balance: ${result.error ?? "unknown RPC error"}`);
+    }
+    if (result.returnValue === undefined || result.returnValue === null) {
+      throw new Error("Soroban returned no token balance value");
+    }
+    return BigInt((result.returnValue as bigint) ?? 0);
   }
 }

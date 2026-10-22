@@ -3,6 +3,7 @@ import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
 import { lockDueGameweeks } from "../jobs/deadlineLocking.js";
 import { settleCompletedGameweeks } from "../jobs/gameweekSettlement.js";
 import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
+import { ledgerAuditService } from "../services/financial/ledgerAuditService.js";
 import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
@@ -46,6 +47,7 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },
   { name: "gameweek-settlement", cron: "*/5 * * * *", handler: () => settleCompletedGameweeks() },
   { name: "league-refunds", cron: "*/5 * * * *", handler: () => processLeagueRefunds() },
+  { name: "ledger-delta-audit", cron: "*/5 * * * *", handler: () => ledgerAuditService.runAudit() },
 ];
 
 const QUEUE_OPTIONS = {
