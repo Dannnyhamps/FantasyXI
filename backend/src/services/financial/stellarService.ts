@@ -37,6 +37,13 @@ export {
   type VerificationFailure,
   type DepositVerificationResult,
 } from "./depositVerificationService.js";
+export {
+  decodeSorobanEscrowEvent,
+  DepositQueue,
+  depositQueue,
+  type DecodedSorobanEscrowEvent,
+  type DepositQueueJobPayload,
+} from "../../queues/depositQueue.js";
 
 export interface VerifyPaymentParams {
   txHash: string;
@@ -62,8 +69,10 @@ export const ESCROW_EVENT_TOPICS = [
   "created",
   "deposit",
   "settle",
+  "m_settle",
   "refund",
   "claimed",
+  "m_claimed",
 ] as const;
 
 export class StellarService {
@@ -506,7 +515,7 @@ export class StellarService {
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
     platformFeeStroops: bigint,
-    distributionBps?: number[]
+    distributionBps?: number[],
     beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
@@ -527,7 +536,7 @@ export class StellarService {
       winners,
       stellarConfig.treasuryAddress,
       platformFeeStroops,
-      distributionBps
+      distributionBps,
       beforeSubmit
     );
   }

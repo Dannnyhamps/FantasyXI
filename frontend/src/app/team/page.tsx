@@ -5,14 +5,13 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
-import { getQueuedMutationCount, hasUnsyncedMutations } from "@/lib/offlineQueue";
 import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import {
   enqueueSquadMutation,
   getQueuedMutations,
   getQueuedMutationCount,
+  hasUnsyncedMutations,
   removeQueuedMutation,
-  syncQueuedMutations,
   updateQueuedMutationRevision,
   type QueuedSquadMutation,
 } from "@/lib/offlineQueue";
@@ -23,14 +22,13 @@ import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
 import { useSquadSolver } from "@/hooks/useSquadSolver";
 import {
-  IconFootball,
   IconCheck,
   IconAlertCircle,
   IconSwap,
-  IconPlus,
 } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 import { PositionBadge } from "@/components/ui/Badge";
@@ -54,10 +52,10 @@ export default function TeamPage() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const { toast } = useToast();
 
-  const { 
-    squadId, setSquadId, 
-    squadName, setSquadName, 
-    players, setPlayers, 
+  const {
+    squadId, setSquadId,
+    squadName, setSquadName,
+    players, setPlayers,
     selectedPlayerId, setSelectedPlayerId,
     activeDragPlayer, setActiveDragPlayer,
     substitutionFeedback, setSubstitutionFeedback,
@@ -66,8 +64,8 @@ export default function TeamPage() {
     setOwnerId, hydrateFromSquad, persistLineupOffline
   } = useTeamStore();
 
-  const { isSolving, validateSquad: solveSquad } = useSquadSolver();
-  const [solverResult, setSolverResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
+  const { validateSquad: solveSquad } = useSquadSolver();
+  const [, setSolverResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
 
   useEffect(() => {
     const solverPayload = players.map((p) => ({
@@ -107,26 +105,12 @@ export default function TeamPage() {
   };
 
   // Toasts, retries and conflict rollback are handled by the sync coordinator
-  const handleManualSync = async () => {
+  const handleManualSync = async (_isAuto = false) => {
     if (isSyncingOfflineQueue) return;
     setIsSyncingOfflineQueue(true);
     try {
       await flushOfflineQueue();
       await refreshQueueCount();
-      if (res.conflicts.length > 0) {
-        const queued = await getQueuedMutations();
-        setConflictMutation(queued.find((mutation) => mutation.id === res.conflicts[0].id) ?? null);
-        toast.info("An offline lineup edit conflicts with the latest server version. Choose how to resolve it below.");
-      }
-      if (res.succeeded > 0) {
-        const msg = isAuto
-          ? `Auto-synced ${res.succeeded} squad update(s) to server!`
-          : `Successfully synced ${res.succeeded} queued change(s)!`;
-        toast.success(msg);
-      }
-      if (res.failed > 0) {
-        toast.error(`Failed to sync ${res.failed} squad change(s). Will retry automatically.`);
-      }
     } catch (err) {
       console.error("Failed to sync queued mutations:", err);
     } finally {
@@ -134,8 +118,6 @@ export default function TeamPage() {
     }
   };
 
-  // Listen to queue changes and register SW. Automatic syncing on reconnection
-  // is app-wide (see OfflineIndicator -> startOfflineSyncCoordinator).
   const useServerSquadVersion = async () => {
     if (!conflictMutation) return;
     await removeQueuedMutation(conflictMutation.id);
@@ -168,7 +150,7 @@ export default function TeamPage() {
   useEffect(() => {
     setOwnerId(userId ?? null);
   }, [userId, setOwnerId]);
-  
+
   // Wildcard chip state
   const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
   const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
@@ -218,8 +200,6 @@ export default function TeamPage() {
         ]);
         if (cancelled) return;
 
-        // Changes queued offline are newer than the server copy: keep showing
-        // them (from the snapshot) until the sync coordinator replays them
         const pendingSnapshot = (await hasUnsyncedMutations(userId!)) ? loadSquadSnapshot(userId!) : null;
         if (cancelled) return;
 
@@ -228,13 +208,12 @@ export default function TeamPage() {
         } else if (squadRes?.data) {
           saveSquadSnapshot(userId!, squadRes.data);
           applySquads(squadRes.data);
-          
-          // Load chip usages if squad has them
+
           if (squadRes.data[0]?.chipUsages) {
             setChipUsages(squadRes.data[0].chipUsages);
           }
         }
-        
+
         if (gameweekRes?.data) {
           setCurrentGameweek({
             id: gameweekRes.data.id,
@@ -242,7 +221,7 @@ export default function TeamPage() {
             deadline: gameweekRes.data.deadline,
           });
         }
-        
+
         showingSnapshot.current = false;
         setOfflineSnapshotAt(null);
       } catch (err) {
@@ -264,7 +243,6 @@ export default function TeamPage() {
 
     loadSquad();
 
-    // Swap the saved copy for live data as soon as the connection returns
     const handleOnline = () => {
       if (showingSnapshot.current) {
         setErrorMessage(null);
@@ -276,15 +254,11 @@ export default function TeamPage() {
       cancelled = true;
       window.removeEventListener("online", handleOnline);
     };
-  }, [isAuthenticated, authLoading, router, userId, hydrateFromSquad]);
+  }, [isAuthenticated, authLoading, router, userId, hydrateFromSquad, setPlayers, setSquadId, setSquadName]);
 
   // Derived state
   const starters = players
     .filter((p) => p.isStarter)
-    .sort((a, b) => a.positionOrder - b.positionOrder);
-
-  const bench = players
-    .filter((p) => !p.isStarter)
     .sort((a, b) => a.positionOrder - b.positionOrder);
 
   const totalSpent = players.reduce((sum, p) => sum + (p.player?.price || 0), 0);
@@ -336,7 +310,7 @@ export default function TeamPage() {
     if (over && active.id !== over.id) {
       const activeIdNum = Number(active.id);
       const overIdNum = Number(over.id);
-      
+
       if (!isNaN(activeIdNum) && !isNaN(overIdNum)) {
         handleSwap(activeIdNum, overIdNum);
       }
@@ -349,7 +323,6 @@ export default function TeamPage() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      // Fetch pool of available players sorted by points
       const res = await api.get<{
         success: boolean;
         data: { players: Player[] } | Player[];
@@ -367,7 +340,6 @@ export default function TeamPage() {
         return;
       }
 
-      // Draft: 2 GKP, 5 DEF, 5 MID, 3 FWD, obeying max 3 per club and budget
       const picked: Player[] = [];
       const teamCounts: Record<number, number> = {};
 
@@ -391,8 +363,6 @@ export default function TeamPage() {
       pickPosition(Position.FWD, 3);
 
       if (picked.length === 15) {
-        // Starters: 1 GKP, 4 DEF, 4 MID, 2 FWD (standard 4-4-2)
-        // Bench: 1 GKP, 1 DEF, 1 MID, 1 FWD
         const gks = picked.filter((p) => p.position === Position.GKP);
         const defs = picked.filter((p) => p.position === Position.DEF);
         const mids = picked.filter((p) => p.position === Position.MID);
@@ -400,7 +370,6 @@ export default function TeamPage() {
 
         const newPlayers: LocalSquadPlayer[] = [];
 
-        // Starters (11)
         newPlayers.push({
           playerId: gks[0].id,
           player: gks[0],
@@ -426,7 +395,7 @@ export default function TeamPage() {
             playerId: p.id,
             player: p,
             isStarter: true,
-            isCaptain: i === 0, // Make first midfielder Captain
+            isCaptain: i === 0,
             isViceCaptain: false,
             positionOrder: 6 + i,
           });
@@ -438,12 +407,11 @@ export default function TeamPage() {
             player: p,
             isStarter: true,
             isCaptain: false,
-            isViceCaptain: i === 0, // Make first forward Vice-Captain
+            isViceCaptain: i === 0,
             positionOrder: 10 + i,
           });
         });
 
-        // Bench (4)
         newPlayers.push({
           playerId: gks[1].id,
           player: gks[1],
@@ -491,29 +459,6 @@ export default function TeamPage() {
     }
   };
 
-  // Click on a player in Pitch or Bench
-  const handlePlayerClick = (clickedPlayer: Player | null, position?: Position) => {
-    if (!clickedPlayer) {
-      // Empty slot clicked -> open picker for this position
-      setActiveModalState({
-        isOpen: true,
-        requiredPosition: position || null,
-        replacingPlayer: null,
-      });
-      return;
-    }
-
-    // If another player is already selected, perform swap!
-    if (selectedPlayerId && selectedPlayerId !== clickedPlayer.id) {
-      handleSwap(selectedPlayerId, clickedPlayer.id);
-      setSelectedPlayerId(null);
-      return;
-    }
-
-    // Otherwise toggle selection
-    setSelectedPlayerId(selectedPlayerId === clickedPlayer.id ? null : clickedPlayer.id);
-  };
-
   // Transfer player (replace with someone from picker)
   const handleReplacePlayer = (newPlayer: Player) => {
     const replacing = activeModalState.replacingPlayer;
@@ -545,27 +490,25 @@ export default function TeamPage() {
       setIsSaving(true);
       setErrorMessage(null);
       try {
-        // Queues the lineup and updates the local snapshot so it survives reloads
         if (!(await persistLineupOffline())) {
-          throw new Error("This lineup can't be queued offline. Complete your squad and try again.");
-        await enqueueSquadMutation({
-          squadId,
-          userId,
-          action: squadId ? "update" : "create",
-          payload,
-          baseRevision: squadRevision,
-        });
+          await enqueueSquadMutation({
+            squadId,
+            userId,
+            action: squadId ? "update" : "create",
+            payload,
+            baseRevision: squadRevision,
+          });
+        }
 
-        // Also update local snapshot so the squad stays visible offline
         if (userId) {
           saveSquadSnapshot(userId, [
             {
-              id: squadId || 0,
+              id: squadId || "0",
               userId,
               name: payload.name,
               players: players.map((p, idx) => ({
                 id: p.id || idx + 1,
-                squadId: squadId || 0,
+                squadId: squadId || "0",
                 playerId: p.playerId,
                 isStarter: p.isStarter,
                 isCaptain: p.isCaptain,
@@ -573,7 +516,7 @@ export default function TeamPage() {
                 positionOrder: idx + 1,
                 player: p.player,
               })),
-            } as Squad,
+            } as unknown as Squad,
           ]);
         }
 
@@ -596,13 +539,10 @@ export default function TeamPage() {
     setErrorMessage(null);
     setSaveSuccessMsg(null);
 
-    // Snapshot current state for rollback
     const previousPlayers: LocalSquadPlayer[] = players.map((p) => ({ ...p, player: { ...p.player } }));
 
     try {
       if (squadId) {
-        // Optimistic update: assume success, rollback on failure
-        let rollback = false;
         try {
           const response = await api.put<{ success: boolean; data: Squad }>(`/api/v1/squads/${squadId}`, {
             ...payload,
@@ -613,7 +553,6 @@ export default function TeamPage() {
           setSaveSuccessMsg(msg);
           toast.success(msg);
         } catch (err: unknown) {
-          rollback = true;
           const msg =
             err instanceof ApiError
               ? err.message || "Failed to save squad."
@@ -625,7 +564,6 @@ export default function TeamPage() {
           toast.error(msg);
         }
       } else {
-        // Create new squad
         const createPayload = {
           ...payload,
           userId: user?.id,
@@ -684,7 +622,7 @@ export default function TeamPage() {
         usedAt: new Date().toISOString(),
       };
       setChipUsages([...chipUsages, newUsage]);
-      
+
       toast.success("Wildcard activated! All transfers this gameweek are free.");
     } catch (err: unknown) {
       const msg =
@@ -741,8 +679,12 @@ export default function TeamPage() {
             canSave={canSave}
           />
 
-          <Pitch isLoading />
-          <Bench isLoading />
+          <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
+            <Pitch isLoading />
+          </ErrorBoundary>
+          <ErrorBoundary name="TeamBuilderBench" fallbackTitle="Substitute bench failed to render">
+            <Bench isLoading />
+          </ErrorBoundary>
         </div>
       </DndContext>
     );
@@ -779,7 +721,7 @@ export default function TeamPage() {
                 {detectFormation(starters)}
               </span>
             </div>
-            
+
             {/* Wildcard Chip Toggle */}
             {currentGameweek && (
               <div className="flex items-center gap-2">
@@ -824,8 +766,6 @@ export default function TeamPage() {
             </div>
             <button
               type="button"
-              onClick={() => handleManualSync()}
-              disabled={isSyncingOfflineQueue || !isOnline}
               onClick={() => handleManualSync(false)}
               disabled={isSyncingOfflineQueue || !isOnline || Boolean(conflictMutation)}
               className="px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold uppercase tracking-wider text-[11px] transition-all disabled:opacity-50 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:cursor-not-allowed"
@@ -1024,10 +964,14 @@ export default function TeamPage() {
         )}
 
         {/* Main Pitch View */}
-        <Pitch />
+        <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
+          <Pitch />
+        </ErrorBoundary>
 
         {/* Dugout Substitute Bench */}
-        <Bench />
+        <ErrorBoundary name="TeamBuilderBench" fallbackTitle="Substitute bench failed to render">
+          <Bench />
+        </ErrorBoundary>
 
         {/* Transfer & Player Picker Modal */}
         <PlayerPickerModal

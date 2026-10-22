@@ -512,7 +512,7 @@ export class SorobanContractClient {
     winners: WinnerPayoutParam[],
     platformTreasury: string,
     platformFeeStroops: bigint,
-    distributionBps?: number[]
+    distributionBps?: number[],
     beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const winnersScVal = SorobanContractClient.winnersScVal(winners);
