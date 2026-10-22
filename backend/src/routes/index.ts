@@ -8,6 +8,7 @@ import squadRoutes from "./squad.routes.js";
 import leagueRoutes from "./league.routes.js";
 import authRoutes from "./auth.routes.js";
 import liveRoutes from "./live.routes.js";
+import ledgerAuditRoutes from "./ledgerAudit.routes.js";
 
 /**
  * Main API v1 router.
@@ -18,6 +19,7 @@ const apiV1Router = Router();
 
 apiV1Router.use("/auth", authRoutes);
 apiV1Router.use("/admin/sync", syncRoutes);
+apiV1Router.use("/admin/ledger-audits", ledgerAuditRoutes);
 apiV1Router.use("/players", playerRoutes);
 apiV1Router.use("/teams", teamRoutes);
 apiV1Router.use("/gameweeks", gameweekRoutes);
