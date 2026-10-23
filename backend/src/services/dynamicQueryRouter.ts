@@ -128,7 +128,9 @@ export async function executeTenantQuery(
     return result;
   } catch (error) {
     console.error(
-      `[DynamicQueryRouter] Query execution failed for tenant ${tenant.id} (schema: ${tenant.schemaName}):`,
+      "[DynamicQueryRouter] Query execution failed for tenant %s (schema: %s):",
+      tenant.id,
+      tenant.schemaName,
       error
     );
     throw error;
@@ -204,7 +206,9 @@ export async function executeTenantTransaction(
     });
   } catch (error) {
     console.error(
-      `[DynamicQueryRouter] Transaction failed for tenant ${tenant.id} (schema: ${tenant.schemaName}):`,
+      "[DynamicQueryRouter] Transaction failed for tenant %s (schema: %s):",
+      tenant.id,
+      tenant.schemaName,
       error
     );
     throw error;

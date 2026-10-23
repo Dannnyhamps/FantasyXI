@@ -176,7 +176,7 @@ export class FinancialService {
     try {
       await this.tracker.track(input);
     } catch (error) {
-      console.error(`[financial] Failed to track transaction ${input.txHash}:`, (error as Error).message);
+      console.error("[financial] Failed to track transaction %s:", input.txHash, (error as Error).message);
     }
   }
 
@@ -1326,7 +1326,7 @@ export class FinancialService {
       await this.deadLetters
         .markRetryFailed(entry, { actorId, error: (error as Error).message })
         .catch((releaseError: Error) =>
-          console.error(`[payouts] Failed to release payout ${failedPayoutId}:`, releaseError)
+          console.error("[payouts] Failed to release payout %s:", failedPayoutId, releaseError)
         );
       throw error;
     }
@@ -1748,7 +1748,8 @@ export class LedgerReconciliationScheduler {
         }
       } catch (err: any) {
         console.error(
-          `[LedgerReconciliationScheduler] Failed to reconcile league ${id}:`,
+          "[LedgerReconciliationScheduler] Failed to reconcile league %s:",
+          id,
           err?.message || err
         );
       }

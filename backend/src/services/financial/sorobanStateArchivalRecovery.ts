@@ -428,7 +428,7 @@ export class SorobanStateArchivalRecoveryService {
           alertEmitted,
         });
       } catch (err) {
-        console.error(`[archival-recovery] Failed inspecting reserve for ${address}:`, err);
+        console.error("[archival-recovery] Failed inspecting reserve for %s:", address, err);
       }
     }
 
