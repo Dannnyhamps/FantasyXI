@@ -780,7 +780,7 @@ model IndexerCursor {
 
 /// Stores indexed Soroban escrow contract events for audit, reconciliation, and history
 model ContractEvent {
-  id         String   @id @default(uuid())
+  id         String   @default(uuid())
   contractId String?  @map("contract_id")
   eventType  String   @map("event_type")
   leagueId   String?  @map("league_id")
@@ -789,9 +789,10 @@ model ContractEvent {
   payload    Json?
   createdAt  DateTime @default(now()) @map("created_at")
 
-  @@index([eventType])
+  @@id([id, createdAt])
+  @@index([eventType, createdAt])
   @@index([leagueId])
-  @@index([txHash])
+  @@index([txHash, createdAt])
   @@index([ledgerSeq])
   @@map("contract_events")
 }
