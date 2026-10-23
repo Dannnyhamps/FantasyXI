@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma as defaultPrisma } from "../../config/db.js";
 import { signAccessToken } from "../../config/jwt.js";
+import { RefreshTokenService } from "./refreshTokenService.js";
 import {
   RegisterInput,
   LoginInput,
@@ -277,13 +278,7 @@ export class AuthService {
       userAgent: null,
     });
     const safeUser = toSafeUser(user);
-    const token = signAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-      role: user.role ?? UserRole.USER,
-      sessionId: session.id,
-    });
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, session.id);
 
     // Best-effort: a signup analytics/notification subscriber failing must
     // never fail registration itself, so this uses `publish` (which never
@@ -296,7 +291,7 @@ export class AuthService {
 
     return {
       user: safeUser,
-      token,
+      ...issued,
     };
   }
 
@@ -393,15 +388,7 @@ export class AuthService {
       ip: "127.0.0.1",
       userAgent: null,
     });
-    const safeUser = toSafeUser(user);
-    const token = signAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-      role: user.role ?? UserRole.USER,
-      sessionId: session.id,
-    });
-    return this.issueAuthResult(user);
+    return this.issueAuthResult(user, session.id);
   }
 
   /**
@@ -451,15 +438,11 @@ export class AuthService {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private issueAuthResult(user: any): AuthResult {
+  private async issueAuthResult(user: any, sessionId?: string): Promise<AuthResult> {
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, sessionId);
     return {
       user: toSafeUser(user),
-      token: signAccessToken({
-        userId: user.id,
-        email: user.email,
-        username: user.username,
-        role: user.role ?? UserRole.USER,
-      }),
+      ...issued,
     };
   }
 
@@ -492,14 +475,7 @@ export class AuthService {
     });
 
     if (user) {
-      const safeUser = toSafeUser(user);
-      const token = signAccessToken({
-        userId: user.id,
-        email: user.email,
-        username: user.username,
-        role: user.role ?? UserRole.USER,
-      });
-      return { user: safeUser, token };
+      return { user: toSafeUser(user), token: signAccessToken({ userId: user.id, email: user.email, username: user.username, role: user.role ?? UserRole.USER }) };
     }
 
     // 2. Check if a user with this email already exists
