@@ -32,6 +32,7 @@ import {
 import { financialService } from "./services/financial/financialService.js";
 import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
 import { fplClient } from "./services/fpl/fplClient.js";
+import { partitionRotationWorker } from "./workers/partitionRotationWorker.js";
 
 dotenv.config();
 
@@ -163,6 +164,9 @@ let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
 let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
 
 async function startServer(): Promise<void> {
+  if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
+    partitionRotationWorker.start();
+  }
   await eventFanout.start();
   chatAdapter = await initRedisChat();
   await apolloServer.start();
@@ -226,6 +230,7 @@ startServer().catch((error) => {
 });
 
 process.on("SIGTERM", () => {
+  partitionRotationWorker.stop();
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())
