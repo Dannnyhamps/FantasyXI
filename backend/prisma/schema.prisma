@@ -1149,3 +1149,80 @@ model FplApiSnapshot {
 
   @@map("fpl_api_snapshots")
 }
+
+// ============================================================
+// LEAGUE INTEGRITY & COLLUSION DETECTION (Issue #328)
+// ============================================================
+
+/// Flags for detected collusion or suspicious coordination within a league.
+/// Immutable evidence is stored as JSON; status transitions via admin review.
+model LeagueCollusionFlag {
+  id                    String                    @id @default(uuid())
+  leagueId              String                    @map("league_id")
+  
+  // Primary risk pair (if single account, pair to self for singleton flags)
+  accountAId            String                    @map("account_a_id")
+  squadAId              String                    @map("squad_a_id")
+  accountBId            String?                   @map("account_b_id")
+  squadBId              String?                   @map("squad_b_id")
+  
+  // Risk scoring
+  riskScore             Float                     // 0.0 to 1.0
+  confidenceLevel       String                    // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+  suspensionThreshold   Float                     @default(0.85)
+  
+  // Evidence (immutable, reproducible)
+  signalsTriggered      String[]                  // ["TRANSFER_SIMILARITY", "SHARED_IP", ...]
+  evidencePayload       Json                      // full structured record with all signal details
+  configVersion         String                    // audit trail: config version that produced this flag
+  
+  // Admin review state
+  status                String                    @default("FLAGGED")  // "FLAGGED", "DISMISSED", "CONFIRMED", "ESCALATED"
+  reviewedBy            String?                   @map("reviewed_by")
+  reviewedAt            DateTime?                 @map("reviewed_at")
+  reviewNote            String?                   @map("review_note")
+  dismissalReason       String?                   @map("dismissal_reason")
+  
+  // Suspension tracking
+  suspendedLeagueParticipationAt DateTime?       @map("suspended_league_participation_at")
+  suspensionReason      String?                   @map("suspension_reason")
+  
+  // Audit trail
+  createdAt             DateTime                  @default(now()) @map("created_at")
+  updatedAt             DateTime                  @updatedAt @map("updated_at")
+  
+  // Relations
+  league                League                    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  accountA              User                      @relation("FlagAccountA", fields: [accountAId], references: [id], onDelete: Cascade)
+  accountB              User?                     @relation("FlagAccountB", fields: [accountBId], references: [id], onDelete: Cascade)
+  squadA                Squad                     @relation("FlagSquadA", fields: [squadAId], references: [id], onDelete: Cascade)
+  squadB                Squad?                    @relation("FlagSquadB", fields: [squadBId], references: [id], onDelete: Cascade)
+  appeals               SuspensionAppeal[]
+  
+  @@unique([leagueId, accountAId, accountBId])
+  @@index([leagueId, status, riskScore])
+  @@index([leagueId, accountAId])
+  @@index([suspendedLeagueParticipationAt])
+  @@map("league_collusion_flags")
+}
+
+/// User appeals against league participation suspension.
+model SuspensionAppeal {
+  id                    String                    @id @default(uuid())
+  flagId                String                    @map("flag_id")
+  accountId             String                    @map("account_id")
+  appealedAt            DateTime                  @default(now()) @map("appealed_at")
+  reason                String
+  status                String                    @default("PENDING")  // "PENDING", "APPROVED", "REJECTED"
+  reviewedBy            String?                   @map("reviewed_by")
+  reviewedAt            DateTime?                 @map("reviewed_at")
+  reviewNote            String?                   @map("review_note")
+  createdAt             DateTime                  @default(now()) @map("created_at")
+  
+  flag                  LeagueCollusionFlag       @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  account               User                      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  @@index([flagId])
+  @@index([accountId, status])
+  @@map("suspension_appeals")
+}
