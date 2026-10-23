@@ -22,6 +22,8 @@ import {
   verifyPasskeyLogin,
   listPasskeys,
   deletePasskey,
+  refresh,
+  logout,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -37,6 +39,8 @@ router.post("/register", authRateLimiter, register);
 
 // POST /api/v1/auth/login
 router.post("/login", authRateLimiter, login);
+router.post("/refresh", authRateLimiter, refresh);
+router.post("/logout", authRateLimiter, logout);
 
 // POST /api/v1/auth/login/verify (step-up code for a login from a new device)
 router.post("/login/verify", authRateLimiter, verifyLoginChallenge);

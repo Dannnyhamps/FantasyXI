@@ -11,6 +11,31 @@ import { locateFromHeaders } from "../services/security/geoVelocity.js";
 import { ReferralService } from "../services/auth/referralService.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { webAuthnService, PasskeyError } from "../services/auth/webAuthnService.js";
+import { refreshTokenService, RefreshTokenUnauthorizedError } from "../services/auth/refreshTokenService.js";
+
+/** POST /api/v1/auth/refresh body: { refreshToken } */
+export async function refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await refreshTokenService.rotate(req.body?.refreshToken);
+    res.json({ success: true, data });
+  } catch (error) {
+    if (error instanceof RefreshTokenUnauthorizedError) {
+      res.status(401).json({ success: false, code: "REFRESH_TOKEN_INVALID", message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+/** POST /api/v1/auth/logout body: { refreshToken } */
+export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    await refreshTokenService.revoke(req.body?.refreshToken);
+    res.json({ success: true, message: "Logged out successfully" });
+  } catch (error) {
+    next(error);
+  }
+}
 
 /** Client metadata that drives login security (issues #117, #331) and Sybil signals (#274). */
 function requestContext(req: Request) {

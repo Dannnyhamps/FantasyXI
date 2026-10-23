@@ -154,6 +154,7 @@ export type LoginRequest = LoginInput;
 export interface AuthResult {
   user: SafeUser;
   token: string;
+  refreshToken?: string;
 }
 
 /** Returned instead of a token when a login from a new device must be verified (issue #331) */

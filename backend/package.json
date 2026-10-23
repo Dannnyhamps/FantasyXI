@@ -43,7 +43,7 @@
     "reconcile:ledger": "tsx src/scripts/reconcileLedger.ts",
     "db:audit-guard": "prisma db execute --file prisma/sql/financial_audit_log_append_only.sql",
     "db:benchmark-replicas": "tsx src/scripts/benchmarkReadReplicas.ts",
-    "db:seed-load-test": "tsx src/scripts/seedLoadTestData.ts"
+    "db:seed-load-test": "tsx src/scripts/seedLoadTestData.ts",
     "test:chaos": "tsx --test src/tests/chaos/postgresConnectionChaos.test.ts"
   },
   "keywords": [],
