@@ -7,6 +7,16 @@ import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
+import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
+import {
+  executeFplSyncTask,
+  FPL_SYNC_DLQ_NAME,
+  FPL_SYNC_QUEUE_NAME,
+  FPL_SYNC_RETRY_LIMIT,
+  fplSyncQueueConfig,
+  fplTaskPriority,
+  type FplSyncTask,
+} from "./fplSyncQueue.js";
 import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
@@ -64,6 +74,8 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "retroactive-bps", cron: "*/30 * * * *", handler: () => applyRetroactiveBpsAdjustments() },
   // Pre-publishes the next JWT signing key when due and prunes retired keys (issue #332)
   { name: "jwt-key-rotation", cron: "*/15 * * * *", handler: () => jwtKeyRotationService.rotate() },
+  // League integrity and collusion detection (issue #328)
+  { name: "league-collusion-audit", cron: "0 */6 * * *", handler: () => auditLeaguesForCollusion() },
 ];
 
 const QUEUE_OPTIONS = {
