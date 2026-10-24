@@ -75,7 +75,6 @@ export class SorobanTtlManagerWorker extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private isRunning: boolean = false;
   private isScanning: boolean = false;
-  private contractClient: SorobanContractClient;
 
   constructor(options?: SorobanTtlWorkerOptions) {
     super();

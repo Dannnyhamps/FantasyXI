@@ -141,7 +141,7 @@ describe("Ledger Hardware Wallet Transport Integration (Issue #355)", () => {
       if (boolValidate) {
         verifiedOnDevice = true;
       }
-      return { publicKey: pubKey };
+      return { publicKey: pubKey, address: pubKey };
     };
 
     const adapter = new LedgerWalletAdapter({

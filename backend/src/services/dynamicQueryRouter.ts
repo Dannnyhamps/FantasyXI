@@ -128,7 +128,9 @@ export async function executeTenantQuery(
     return result;
   } catch (error) {
     console.error(
-      `[DynamicQueryRouter] Query execution failed for tenant ${tenant.id} (schema: ${tenant.schemaName}):`,
+      "[DynamicQueryRouter] Query execution failed for tenant %s (schema: %s):",
+      tenant.id,
+      tenant.schemaName,
       error
     );
     throw error;
@@ -204,7 +206,9 @@ export async function executeTenantTransaction(
     });
   } catch (error) {
     console.error(
-      `[DynamicQueryRouter] Transaction failed for tenant ${tenant.id} (schema: ${tenant.schemaName}):`,
+      "[DynamicQueryRouter] Transaction failed for tenant %s (schema: %s):",
+      tenant.id,
+      tenant.schemaName,
       error
     );
     throw error;
@@ -341,8 +345,9 @@ export function createTenantAwarePrismaClient(
     query: {
       // Intercept raw queries
       $executeRaw: async ({ query, args }) => {
+        const sqlText = typeof args === "string" ? args : String((args as any)?.strings?.join?.(" ") ?? args);
         // Validate query
-        if (!validateTenantQuery(query)) {
+        if (!validateTenantQuery(sqlText)) {
           throw new Error(
             `Dangerous query attempted in tenant schema: ${query}`
           );
@@ -357,8 +362,9 @@ export function createTenantAwarePrismaClient(
         return query(args);
       },
       $executeRawUnsafe: async ({ query, args }) => {
+        const sqlText = Array.isArray(args) ? String(args[0] ?? "") : String(args);
         // Validate query
-        if (!validateTenantQuery(query)) {
+        if (!validateTenantQuery(sqlText)) {
           throw new Error(
             `Dangerous query attempted in tenant schema: ${query}`
           );

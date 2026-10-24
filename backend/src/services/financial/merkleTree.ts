@@ -174,7 +174,7 @@ export function verifyMerkleProof(
   proof: (Buffer | string)[],
   expectedRoot: Buffer | string
 ): boolean {
-  let current = Buffer.from(leafHash);
+  let current: Buffer = Buffer.from(leafHash);
   const rootBuf = typeof expectedRoot === "string" ? Buffer.from(expectedRoot, "hex") : expectedRoot;
 
   for (const item of proof) {

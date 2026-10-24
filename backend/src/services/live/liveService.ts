@@ -4,6 +4,14 @@ import { getRedisClient, type IRedisCacheClient } from "../../config/redis.js";
 import { MembershipStatus, Position } from "../../types/index.js";
 import { ScoringService, PlayerScoreDetail } from "../scoring/scoringService.js";
 import { allocateProvisionalBonus } from "../scoring/provisionalBps.js";
+export {
+  LiveProvisionalLeaderboardService,
+  liveProvisionalLeaderboardService,
+  type LiveMatchEvent,
+  type LiveLeaderboardDeltaDiff,
+  type ProvisionalSquadRecord,
+  type ProvisionalLeaderboardRankEntry,
+} from "./liveProvisionalLeaderboardService.js";
 
 /**
  * Live Matchday Service.

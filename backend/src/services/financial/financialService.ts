@@ -176,7 +176,7 @@ export class FinancialService {
     try {
       await this.tracker.track(input);
     } catch (error) {
-      console.error(`[financial] Failed to track transaction ${input.txHash}:`, (error as Error).message);
+      console.error("[financial] Failed to track transaction %s:", input.txHash, (error as Error).message);
     }
   }
 
@@ -702,7 +702,7 @@ export class FinancialService {
    */
   public async prepareSettlement(
     leagueId: string,
-    requesterUserId: string
+    requesterUserId?: string
   ): Promise<SettlementPlan> {
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
@@ -720,7 +720,7 @@ export class FinancialService {
       throw new FinancialNotFoundError(`League ${leagueId} not found`);
     }
 
-    if (league.creatorId !== requesterUserId) {
+    if (requesterUserId && league.creatorId !== requesterUserId) {
       throw new FinancialForbiddenError(
         "Only the league creator or administrator can prepare settlements"
       );
@@ -895,24 +895,33 @@ export class FinancialService {
       BigInt(Math.round(amount * 100)) * 100_000n;
     let result;
     try {
-      result = await this.stellar.settleLeague(
-        contractLeagueId,
-        plan.winners.map((winner) => ({
-          winner: winner.stellarAddress,
-          amount: toStroops(winner.prizeAmount).toString(),
-        })),
-        toStroops(plan.platformFee),
-        plan.distributionBps
-        async (txHash: string, envelope: string) => {
-          const attempt = await this.db.coordinatedTransaction.upsert({
-            where: { settlementKey: leagueId },
-            create: { settlementKey: leagueId, txHash, kind: "SETTLEMENT", leagueId, userId: adminUserId,
-              metadata: { plan, adminUserId, envelope }, status: "PENDING", nextPollAt: new Date() },
-            update: {},
-          });
-          if (attempt.txHash !== txHash) throw new Error("Another settlement is already journaled for this league");
-        }
-      );
+      const beforeSubmit = async (txHash: string, envelope: string) => {
+        const attempt = await this.db.coordinatedTransaction.upsert({
+          where: { settlementKey: leagueId },
+          create: { settlementKey: leagueId, txHash, kind: "SETTLEMENT", leagueId, userId: adminUserId,
+            metadata: { plan, adminUserId, envelope }, status: "PENDING", nextPollAt: new Date() },
+          update: {},
+        });
+        if (attempt.txHash !== txHash) throw new Error("Another settlement is already journaled for this league");
+      };
+      const mappedWinners = plan.winners.map((winner) => ({
+        winner: winner.stellarAddress,
+        amount: toStroops(winner.prizeAmount).toString(),
+      }));
+      result = plan.distributionBps
+        ? await this.stellar.settleLeague(
+            contractLeagueId,
+            mappedWinners,
+            toStroops(plan.platformFee),
+            plan.distributionBps,
+            beforeSubmit
+          )
+        : await this.stellar.settleLeague(
+            contractLeagueId,
+            mappedWinners,
+            toStroops(plan.platformFee),
+            beforeSubmit
+          );
     } catch (error) {
       throw new FinancialConflictError(
         `Settlement dispatch failed: ${(error as Error).message}`
@@ -1317,7 +1326,7 @@ export class FinancialService {
       await this.deadLetters
         .markRetryFailed(entry, { actorId, error: (error as Error).message })
         .catch((releaseError: Error) =>
-          console.error(`[payouts] Failed to release payout ${failedPayoutId}:`, releaseError)
+          console.error("[payouts] Failed to release payout %s:", failedPayoutId, releaseError)
         );
       throw error;
     }
@@ -1739,7 +1748,8 @@ export class LedgerReconciliationScheduler {
         }
       } catch (err: any) {
         console.error(
-          `[LedgerReconciliationScheduler] Failed to reconcile league ${id}:`,
+          "[LedgerReconciliationScheduler] Failed to reconcile league %s:",
+          id,
           err?.message || err
         );
       }

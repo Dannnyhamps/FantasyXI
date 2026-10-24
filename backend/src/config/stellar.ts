@@ -293,7 +293,7 @@ export class HorizonConnectionPool {
           node.healthy = false;
 
           if (node.consecutiveErrors >= this.failureThreshold || node.circuitState === "HALF_OPEN") {
-            if (node.circuitState !== "OPEN") {
+            if ((node.circuitState as string) !== "OPEN") {
               node.circuitState = "OPEN";
               node.lastStateChange = Date.now();
               this.warn(`[stellar] Horizon circuit TRIPPED to OPEN for ${safeUrl(node.url)} after ${node.consecutiveErrors} errors`);
@@ -552,7 +552,7 @@ export class SorobanRpcConnectionPool {
           node.healthy = false;
 
           if (node.consecutiveErrors >= this.failureThreshold || node.circuitState === "HALF_OPEN") {
-            if (node.circuitState !== "OPEN") {
+            if ((node.circuitState as string) !== "OPEN") {
               node.circuitState = "OPEN";
               node.lastStateChange = Date.now();
               this.warn(`[stellar] Soroban RPC circuit TRIPPED to OPEN for ${safeUrl(node.url)}`);

@@ -102,7 +102,7 @@ async function getCachedTenant(
         await redis.del(cacheKey);
       }
     } catch (error) {
-      console.warn(`[TenantCache] Redis get error for ${tenantId}:`, error);
+      console.warn("[TenantCache] Redis get error for %s:", tenantId, error);
       // Fall through to memory cache
     }
   }
@@ -147,7 +147,8 @@ async function cacheTenant(
       await redis.set(cacheKey, JSON.stringify(entry), "EX", ttlSeconds);
     } catch (error) {
       console.warn(
-        `[TenantCache] Redis set error for ${context.id}:`,
+        "[TenantCache] Redis set error for %s:",
+        context.id,
         error
       );
       // Fallback to memory cache already done above
@@ -173,7 +174,8 @@ export async function invalidateTenantCache(tenantId: string): Promise<void> {
       await redis.del(cacheKey);
     } catch (error) {
       console.warn(
-        `[TenantCache] Redis delete error for ${tenantId}:`,
+        "[TenantCache] Redis delete error for %s:",
+        tenantId,
         error
       );
     }

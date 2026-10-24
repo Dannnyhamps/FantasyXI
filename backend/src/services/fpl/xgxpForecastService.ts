@@ -134,7 +134,7 @@ export class XGXPForecastService {
           return data;
         }
       } catch (err) {
-        console.warn(`[xgxp] Redis GET failed for ${cacheKey}:`, (err as Error).message);
+        console.warn("[xgxp] Redis GET failed for %s:", cacheKey, (err as Error).message);
       }
     }
 
@@ -166,7 +166,7 @@ export class XGXPForecastService {
         await this.redis.set(cacheKey, JSON.stringify(forecast), "EX", CACHE_TTL_SECONDS);
         console.log(`[xgxp] Cached forecast in Redis: ${cacheKey}`);
       } catch (err) {
-        console.warn(`[xgxp] Redis SET failed for ${cacheKey}:`, (err as Error).message);
+        console.warn("[xgxp] Redis SET failed for %s:", cacheKey, (err as Error).message);
       }
     }
   }
@@ -312,7 +312,6 @@ export class XGXPForecastService {
           where: {
             isAvailable: true, // Only forecast available players
           },
-          include: { team: true },
           select: {
             id: true,
             fplId: true,

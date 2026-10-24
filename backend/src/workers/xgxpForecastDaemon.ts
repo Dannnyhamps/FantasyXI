@@ -106,7 +106,7 @@ export class XGXPForecastDaemon {
         `[xgxp-daemon] Invalidated forecasts for player ${evt.playerId} across ${upcomingGameweeks.length} gameweeks`
       );
     } catch (err) {
-      logger.error("[xgxp-daemon] Error handling injury update:", (err as Error).message);
+      logger.error({ err: (err as Error).message }, "[xgxp-daemon] Error handling injury update");
     }
   }
 
@@ -153,8 +153,8 @@ export class XGXPForecastDaemon {
       );
     } catch (err) {
       logger.error(
-        "[xgxp-daemon] Batch recomputation failed, retaining previous forecasts:",
-        (err as Error).message
+        { err: (err as Error).message },
+        "[xgxp-daemon] Batch recomputation failed, retaining previous forecasts"
       );
     } finally {
       this.batchRunInProgress = false;
@@ -178,7 +178,7 @@ export class XGXPForecastDaemon {
     try {
       await this.runBatchRecomputation();
     } catch (err) {
-      logger.error("[xgxp-daemon] Tick error:", (err as Error).message);
+      logger.error({ err: (err as Error).message }, "[xgxp-daemon] Tick error");
     } finally {
       this.schedule(this.pollIntervalMs);
     }

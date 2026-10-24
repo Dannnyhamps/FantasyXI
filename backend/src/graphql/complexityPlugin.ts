@@ -70,6 +70,7 @@ export function createComplexityPlugin(
       }
 
       const { document, operationName, request } = requestContext;
+      if (!document) return;
       const startTime = performance.now();
 
       // Only validate for queries and subscriptions, not mutations
@@ -83,8 +84,8 @@ export function createComplexityPlugin(
         // Step 1: Validate query depth
         const depthResult = validateQueryDepth(document, finalConfig);
         if (!depthResult.valid) {
-          requestContext.errors = requestContext.errors || [];
-          requestContext.errors.push(depthResult.error!);
+          (requestContext as any).errors = (requestContext as any).errors || [];
+          ((requestContext as any).errors as GraphQLError[]).push(depthResult.error!);
 
           if (finalConfig.debugLogging) {
             console.log(
@@ -110,8 +111,8 @@ export function createComplexityPlugin(
               },
             }
           );
-          requestContext.errors = requestContext.errors || [];
-          requestContext.errors.push(error);
+          (requestContext as any).errors = (requestContext as any).errors || [];
+          ((requestContext as any).errors as GraphQLError[]).push(error);
           return;
         }
 
@@ -127,8 +128,8 @@ export function createComplexityPlugin(
               },
             }
           );
-          requestContext.errors = requestContext.errors || [];
-          requestContext.errors.push(error);
+          (requestContext as any).errors = (requestContext as any).errors || [];
+          ((requestContext as any).errors as GraphQLError[]).push(error);
 
           if (finalConfig.debugLogging) {
             console.log(
@@ -165,8 +166,8 @@ export function createComplexityPlugin(
         );
 
         if (!rateLimitCheck.allowed) {
-          requestContext.errors = requestContext.errors || [];
-          requestContext.errors.push(rateLimitCheck.error!);
+          (requestContext as any).errors = (requestContext as any).errors || [];
+          ((requestContext as any).errors as GraphQLError[]).push(rateLimitCheck.error!);
 
           if (finalConfig.debugLogging) {
             console.log(
@@ -177,8 +178,8 @@ export function createComplexityPlugin(
 
           // Add retry-after header if we can
           if (rateLimitCheck.retryAfter && requestContext.response) {
-            requestContext.response.headers = requestContext.response.headers || new Map();
-            requestContext.response.headers.set("retry-after", Math.ceil(rateLimitCheck.retryAfter).toString());
+            (requestContext.response as any).headers = (requestContext.response as any).headers || new Map();
+            (requestContext.response as any).headers.set("retry-after", Math.ceil(rateLimitCheck.retryAfter).toString());
           }
 
           return;
@@ -200,7 +201,7 @@ export function createComplexityPlugin(
 
         // Attach to context value for access in resolvers
         if (!requestContext.contextValue) {
-          requestContext.contextValue = {};
+          (requestContext as any).contextValue = {};
         }
         (requestContext.contextValue as any).complexityMetadata = complexityMetadata;
 
@@ -228,11 +229,15 @@ export function createComplexityPlugin(
       // Log complexity-related errors with additional context
       if (requestContext.errors) {
         const complexityErrors = requestContext.errors.filter(
-          (err) =>
-            err.extensions?.code &&
-            (err.extensions.code.includes("COMPLEXITY") ||
-              err.extensions.code.includes("DEPTH") ||
-              err.extensions.code.includes("RATE_LIMIT"))
+          (err) => {
+            const code = typeof err.extensions?.code === "string" ? err.extensions.code : "";
+            return Boolean(
+              code &&
+                (code.includes("COMPLEXITY") ||
+                  code.includes("DEPTH") ||
+                  code.includes("RATE_LIMIT"))
+            );
+          }
         );
 
         if (complexityErrors.length > 0 && finalConfig.debugLogging) {
@@ -246,7 +251,7 @@ export function createComplexityPlugin(
         }
       }
     },
-  };
+  } as unknown as ApolloServerPlugin<BaseContext>;
 }
 
 /**

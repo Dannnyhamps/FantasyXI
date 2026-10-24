@@ -16,8 +16,8 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import { AuthUser, TenantContext } from "../types/index.js";
-import { TenantNotFoundError } from "../types/tenant.js";
+import { AuthUser } from "../types/index.js";
+import { TenantNotFoundError, TenantContext } from "../types/tenant.js";
 import { resolveTenant, getUserDefaultTenant } from "../services/tenantContextService.js";
 
 /**
@@ -85,7 +85,7 @@ export function tenantContext(options: TenantContextOptions = { required: false 
 
       // 3. Try URL route parameter :tenantId
       if (!tenantId && req.params.tenantId) {
-        tenantId = req.params.tenantId;
+        tenantId = Array.isArray(req.params.tenantId) ? req.params.tenantId[0] : req.params.tenantId;
         source = "param";
       }
 
@@ -273,7 +273,7 @@ export function extractTenantIdFromRequest(req: Request): string | null {
 
   // Check URL param
   if (req.params.tenantId) {
-    return req.params.tenantId;
+    return Array.isArray(req.params.tenantId) ? req.params.tenantId[0] : req.params.tenantId;
   }
 
   return null;
@@ -288,7 +288,7 @@ export function debugTenantExtraction(
   return {
     jwt_claim: (req.user as any)?.tenant_id || null,
     header: (req.headers["x-tenant-id"] as string) || null,
-    url_param: req.params.tenantId || null,
+    url_param: (Array.isArray(req.params.tenantId) ? req.params.tenantId[0] : req.params.tenantId) || null,
     resolved: req.tenant?.id || null,
     source: req.tenantSource || null,
   };

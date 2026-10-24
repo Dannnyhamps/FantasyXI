@@ -24,6 +24,7 @@ import { LiveSquadModal } from "@/components/live/LiveSquadModal";
 import { useLiveLeague } from "@/components/live/useLiveLeague";
 import { LeagueStatusBadge, Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
@@ -567,33 +568,46 @@ export default function LeagueDetailPage({
               </div>
             </div>
 
-            {completedGameweeks.length > 0 && selectedGameweekId !== null ? (
-              <HistoricalStandingsScrubber
-                gameweeks={completedGameweeks}
-                selectedGameweekId={selectedGameweekId}
-                standings={historicalStandings}
-                loading={historicalLoading}
-                error={historicalError}
-                onSelectGameweek={setSelectedGameweekId}
-                entryFee={league.entryFee}
-                prizePool={league.prizePool}
-                currentUserId={user?.id}
-              />
-            ) : (
-              <StandingsTable
-                standings={displayStandings}
-                entryFee={league.entryFee}
-                prizePool={league.prizePool}
-                currentUserId={user?.id}
-                livePoints={livePoints}
-                rankChanges={rankChanges}
-                onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
-              />
-            )}
+            <ErrorBoundary
+              name="LeagueStandings"
+              fallbackTitle="Standings table encountered an error"
+              onReset={loadLeagueData}
+              resetKeys={[leagueId, selectedGameweekId]}
+            >
+              {completedGameweeks.length > 0 && selectedGameweekId !== null ? (
+                <HistoricalStandingsScrubber
+                  gameweeks={completedGameweeks}
+                  selectedGameweekId={selectedGameweekId}
+                  standings={historicalStandings}
+                  loading={historicalLoading}
+                  error={historicalError}
+                  onSelectGameweek={setSelectedGameweekId}
+                  entryFee={league.entryFee}
+                  prizePool={league.prizePool}
+                  currentUserId={user?.id}
+                />
+              ) : (
+                <StandingsTable
+                  standings={displayStandings}
+                  entryFee={league.entryFee}
+                  prizePool={league.prizePool}
+                  currentUserId={user?.id}
+                  livePoints={livePoints}
+                  rankChanges={rankChanges}
+                  onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
+                />
+              )}
+            </ErrorBoundary>
           </div>
 
           {user && (isMember || isCreator) && (
-            <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+            <ErrorBoundary
+              name="LeagueChat"
+              fallbackTitle="League chat temporarily unavailable"
+              resetKeys={[league.id]}
+            >
+              <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+            </ErrorBoundary>
           )}
         </div>
 

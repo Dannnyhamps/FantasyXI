@@ -102,12 +102,13 @@ export async function updateSquad(
     }
 
     const { id } = req.params;
+    const userId = req.user.id;
     // Pass authenticated user ID for ownership verification under distributed lock
     const squad = await withSquadLock(id as string, async () => {
       return await squadService.updateSquad(
         id as string,
         req.body,
-        req.user.id
+        userId
       );
     });
 
@@ -121,6 +122,9 @@ export async function updateSquad(
       res.status(409).json({
         success: false,
         message: error.message,
+      });
+      return;
+    }
     if (error instanceof SquadRevisionConflictError) {
       res.status(409).json({
         success: false,

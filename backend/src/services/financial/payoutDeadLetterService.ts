@@ -621,7 +621,7 @@ export class PayoutDeadLetterService {
 
     const avgAttempts =
       allPending.length > 0
-        ? allPending.reduce((sum, e) => sum + e.attempts, 0) / allPending.length
+        ? allPending.reduce((sum: number, e: { attempts: number }) => sum + e.attempts, 0) / allPending.length
         : 0;
 
     return {

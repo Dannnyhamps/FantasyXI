@@ -234,7 +234,7 @@ export class ComplexityRateGovernor {
     `;
 
     try {
-      this.luaScriptSha = await this.redis.script("LOAD", luaScript);
+      this.luaScriptSha = String(await this.redis.script("LOAD", luaScript));
       return this.luaScriptSha;
     } catch (error) {
       console.error("[Complexity] Failed to load Lua script:", error);

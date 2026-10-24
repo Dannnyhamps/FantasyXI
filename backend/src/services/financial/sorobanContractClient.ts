@@ -512,10 +512,17 @@ export class SorobanContractClient {
     winners: WinnerPayoutParam[],
     platformTreasury: string,
     platformFeeStroops: bigint,
-    distributionBps?: number[]
-    beforeSubmit?: (hash: string, envelope: string) => Promise<void>
+    distributionBpsOrBeforeSubmit?: number[] | ((hash: string, envelope: string) => Promise<void>),
+    beforeSubmitArg?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const winnersScVal = SorobanContractClient.winnersScVal(winners);
+    const distributionBps = Array.isArray(distributionBpsOrBeforeSubmit)
+      ? distributionBpsOrBeforeSubmit
+      : undefined;
+    const beforeSubmit =
+      typeof distributionBpsOrBeforeSubmit === "function"
+        ? distributionBpsOrBeforeSubmit
+        : beforeSubmitArg;
 
     if (distributionBps) {
       PrizeService.encodeSorobanDistribution(distributionBps);
@@ -526,7 +533,7 @@ export class SorobanContractClient {
         SorobanContractClient.address(platformTreasury),
         SorobanContractClient.i128(platformFeeStroops),
         xdr.ScVal.scvVec(distributionBps.map((value) => nativeToScVal(value, { type: "u32" }))),
-      ]);
+      ], beforeSubmit);
     }
 
     return this.invoke(adminSecret, this.escrowContractId, "settle", [
@@ -954,7 +961,7 @@ export class SorobanContractClient {
         new xdr.LedgerKeyContractData({
           contract: contractScAddress,
           key: xdr.ScVal.scvLedgerKeyContractInstance(),
-          durability: xdr.ContractDataDurability.persistent(),
+          durability: typeof (xdr.ContractDataDurability as any).persistent === "function" ? (xdr.ContractDataDurability as any).persistent() : xdr.ContractDataDurability.persistent,
         })
       );
       const [res, latest] = await Promise.all([
@@ -994,7 +1001,7 @@ export class SorobanContractClient {
             xdr.ScVal.scvSymbol("League"),
             SorobanContractClient.u64(leagueId),
           ]),
-          durability: xdr.ContractDataDurability.persistent(),
+          durability: typeof (xdr.ContractDataDurability as any).persistent === "function" ? (xdr.ContractDataDurability as any).persistent() : xdr.ContractDataDurability.persistent,
         })
       );
       const [res, latest] = await Promise.all([

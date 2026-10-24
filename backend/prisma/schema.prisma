@@ -1079,6 +1079,7 @@ model TenantMigration {
   @@unique([tenantId, migrationName])
   @@index([tenantId, appliedAt])
   @@map("tenant_migrations")
+}
 /// Asymmetric access-token signing key (issue #332). A key signs from
 /// activatesAt until a successor activates, then only verifies until retiresAt.
 model JwtSigningKey {
