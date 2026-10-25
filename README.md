@@ -94,6 +94,12 @@ FantasyXI enforces a strict boundary between Web2 application gameplay and Web3 
 | **Soroban RPC Server** | `https://soroban-testnet.stellar.org` |
 | **Horizon API Server** | `https://horizon-testnet.stellar.org` |
 
+### Financial Ledger Auditing
+
+The backend runs a PostgreSQL-backed escrow reconciliation every five minutes. It compares confirmed league transactions and active member deposits with the Soroban USDC escrow balance, and cross-checks indexed deposit, settlement, refund, and claim events. Reports and their findings are stored in `ledger_audit_runs` / `ledger_audit_findings`; each report includes Horizon, Soroban, and event-indexer ledger sequences and a SHA-256 hash linked to the previous report. High-severity findings are logged as operational alerts. The auditor is read-only and never applies balance corrections.
+
+Staff can review recent reports at `GET /api/v1/admin/ledger-audits` (ADMIN or MODERATOR). Configure `LEDGER_AUDIT_THRESHOLD_STROOPS` to set the global balance alert threshold; the default is `100000` stroops (0.01 USDC). Apply the added Prisma models before deploying the auditor with `cd backend && npx prisma db push`.
+
 ---
 
 ## Core Subsystems
@@ -232,9 +238,17 @@ npm run dev
 Backend API will be running at `http://localhost:5000`.
 
 ### 3. Frontend Setup
-Navigate to `frontend/`:
+The frontend is a Next.js app and should be started from the `frontend/` directory using a supported Node.js version.
+
+Requirements:
+- **Node.js**: `v20.x` or `v24.x`
+- **Package manager**: `npm`
+
+From the repository root:
 ```bash
-cd ../frontend
+cd frontend
+node -v
+npm install
 cp .env.example .env.local
 ```
 
@@ -247,16 +261,20 @@ NEXT_PUBLIC_STELLAR_SOROBAN_RPC_URL="https://soroban-testnet.stellar.org"
 NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 ```
 
-Install dependencies and start Next.js:
+Install dependencies and start the local Next.js development server:
 ```bash
 npm install
 npm run dev
 ```
-Frontend will be accessible at `http://localhost:3000`.
+
+For the current Next.js setup, `npm run dev` starts the local development server (using the standard Next.js app setup; in v16 this can use Turbopack under the hood). The frontend will be available at `http://localhost:3000`.
 
 ---
 
 ## Testing & Quality Assurance
+
+See [backend resilience checks](backend/RESILIENCE.md) for financial chaos testing,
+read-replica consistency, Redis Streams fanout, and local k6 load testing.
 
 FantasyXI maintains automated test suites across all architectural layers.
 
@@ -298,6 +316,16 @@ npm run build
 ```
 **Output**: `13/13 static & dynamic routes compiled with zero errors`.
 
+### 5. Progressive Web App (Offline Mode)
+The frontend installs as a PWA (manifest + service worker in `frontend/public/`). The service worker is only registered in production builds:
+```bash
+cd frontend
+npm run build && npm start
+```
+- Open the app once online and sign in; the squad page and its assets are cached at install, and each successful squad load saves a per-user snapshot on the device.
+- In DevTools > Application, check the manifest and service worker, then tick **Network > Offline** and reload `/team`: the squad is shown read-only with an offline banner. Uncached pages fall back to `/offline.html`.
+- Saving the squad and transfers always require a connection. Authenticated API responses are never stored in the shared service worker cache, and offline snapshots are cleared on sign-out.
+
 ---
 
 ## Production Deployment Guide
@@ -330,9 +358,12 @@ npm run build
 ## Security & Regulatory Compliance
 
 - **Non-Custodial Architecture**: FantasyXI never takes possession or custody of user stablecoins. Funds reside exclusively in the open-source Soroban smart contract escrow partition until settlement.
+- **Google Sign-In & Account Linking**: Managers can sign in with email/password or Google (OAuth 2.0 / OpenID Connect); both open the same account. A verified Google email matching an existing account is linked automatically, and signed-in managers can link or unlink Google (and add a password to a Google-only account) from their profile. The OAuth state is HMAC-signed and bound to the initiating browser with an HttpOnly nonce cookie, return paths are restricted to same-site paths, and the issued JWT is handed to the frontend in the URL fragment so it never reaches server logs.
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
 - **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
+- **Role-Based Access Control**: Every protected endpoint declares the permission it needs via `requirePermission`; the role-to-permission matrix lives in [`backend/src/config/permissions.ts`](backend/src/config/permissions.ts). Roles are `USER` (managers), `MODERATOR`, `ADMIN` and `SERVICE` (automated callers). Elevated permissions are re-checked against the database on each request, so demoting an account takes effect immediately. A route audit test fails the build if a non-public endpoint is added without a permission guard.
+- **Service Credentials**: Schedulers and monitoring authenticate with the `X-Service-Key` header using keys from `SERVICE_API_KEYS` (`name:key` pairs, keys of at least 32 characters). The `SERVICE` role can run syncs, score calculation, reconciliation and queue health checks, but cannot act as a manager, and it can never be claimed through a user JWT.
 - Consult [`REGULATORY_CONSIDERATIONS.md`](file:///c:/ReactApps/FantasyXI/REGULATORY_CONSIDERATIONS.md) for legal classifications, skill-game exemptions, and AML operational considerations.
 
 ---
@@ -340,3 +371,50 @@ npm run build
 ## License
 
 This project is licensed under the **ISC License**. See the `LICENSE` file for details.
+
+## Stellar Testnet Setup
+
+This section helps contributors configure the Stellar Testnet environment locally to interact with Soroban contracts and the USDC Stellar Asset used by FantasyXI.
+
+- **Network & endpoints**:
+   - Horizon: `https://horizon-testnet.stellar.org`
+   - Soroban RPC: `https://soroban-testnet.stellar.org`
+   - Network passphrase: `Test SDF Network ; September 2015`
+
+- **Required environment variables** (add these to `backend/.env` and `frontend/.env.local` as appropriate):
+   - `STELLAR_NETWORK` (e.g. `TESTNET`)
+   - `STELLAR_HORIZON_URL` (e.g. `https://horizon-testnet.stellar.org`)
+   - `STELLAR_SOROBAN_RPC_URL` (e.g. `https://soroban-testnet.stellar.org`)
+   - `STELLAR_NETWORK_PASSPHRASE` (e.g. `Test SDF Network ; September 2015`)
+   - `STELLAR_USDC_ASSET_CODE` (e.g. `USDC`)
+   - `STELLAR_USDC_ISSUER` (classic issuer public key, e.g. `GC43IGCUMQYECKMRKGSJE2RPQPJ2QNHFB6VAHNNBO4NONKK3PVHEXN25`)
+   - `STELLAR_USDC_TOKEN_CONTRACT_ID` (SAC contract id, e.g. `CBKWOGJ7CQSVZXIOIIPCDAUT6APQYBCEE7QTSGDZZ2RO6D3JYRMKWZNG`)
+   - `STELLAR_ESCROW_CONTRACT_ID` (Escrow contract id, e.g. `CB4KIK42P32SZHKG4JBDCJUV4A4KGCDN6RHOOTIFSBGZHS2IF653VOEA`)
+
+- **Creating & funding testnet accounts**:
+   1. Generate a new keypair using the Stellar Laboratory or the SDK of your choice.
+       - Stellar Laboratory Keypair tool: https://laboratory.stellar.org/#account-creator?network=test
+   2. Fund your testnet account using Friendbot:
+       - Friendbot URL: `https://friendbot.stellar.org/?addr=YOUR_PUBLIC_KEY`
+       - Example: `curl "https://friendbot.stellar.org/?addr=G...YOUR_PUBLIC...KEY"`
+
+- **Obtaining testnet USDC**:
+   - On Testnet, USDC is represented by a token issuer and/or SAC contract. If the repo provides a test USDC faucet script, run it; otherwise request USDC by contacting the test asset issuer or minting via a local/authorized issuer key (not in production).
+   - Helpful links:
+      - Stellar Laboratory (Transactions & Assets): https://laboratory.stellar.org/
+      - Horizon Testnet Explorer: https://stellar.expert/explorer/testnet
+
+- **Trustline note**: Before receiving USDC or interacting with the USDC SAC, ensure your test account establishes a trustline to the USDC asset (unless using contract-controlled flows that don't require a classic trustline). In the Stellar Laboratory, add an Asset with code `USDC` and issuer `GC43IGCUMQYECKMRKGSJE2RPQPJ2QNHFB6VAHNNBO4NONKK3PVHEXN25` and submit a change-trust operation.
+
+- **Quick example: fund + trustline via `stellar-sdk` (Node.js)**
+```js
+// install: npm install stellar-sdk
+const StellarSdk = require('stellar-sdk');
+const server = new StellarSdk.Server('https://horizon-testnet.stellar.org');
+const pair = StellarSdk.Keypair.random();
+console.log('Public:', pair.publicKey());
+console.log('Secret:', pair.secret());
+// Fund using Friendbot (curl in shell) then create trustline and optionally request test USDC from issuer-owned faucet.
+```
+
+If you follow the steps above you will be able to fund a testnet account and configure your local environment to interact with the Soroban RPC and the FantasyXI escrow contract on Stellar Testnet.
