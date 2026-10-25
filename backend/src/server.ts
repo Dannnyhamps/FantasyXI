@@ -7,6 +7,7 @@ import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { optionalAuth } from "./middleware/authMiddleware.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
 import { Permission } from "./types/index.js";
@@ -55,8 +56,9 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(optionalAuth);
 app.use(apiRateLimiter);
+app.use(express.json());
 
 // ============================================================
 // Routes
