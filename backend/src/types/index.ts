@@ -8,6 +8,8 @@
  * API Resource shapes combined.
  */
 
+import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/server";
+
 // ============================================================
 // Enums — must match the Prisma schema exactly
 // ============================================================
@@ -18,11 +20,15 @@ import {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
   UserRole,
 } from "@prisma/client";
+
+export { Role, Permission } from "../config/permissions.js";
+import type { Role } from "../config/permissions.js";
 
 export {
   Position,
@@ -30,6 +36,7 @@ export {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
@@ -86,7 +93,8 @@ export interface AuthUser {
   email: string;
   username: string;
   name?: string | null;
-  role: UserRole;
+  /** USER / MODERATOR / ADMIN for accounts, SERVICE for API-key callers */
+  role: Role;
 }
 
 /** Safe user representation returned across public and auth endpoints */
@@ -96,6 +104,11 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
+  /** Sign-in methods available to the account (email/password and/or Google) */
+  authProviders: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -124,6 +137,14 @@ export type RegisterRequest = RegisterInput;
 export interface LoginInput {
   email: string;
   password: string;
+  /** Browser entropy fingerprint used for device recognition (issue #331); optional for API clients */
+  deviceFingerprint?: string;
+}
+
+/** POST /api/v1/auth/login/verify input: the step-up code emailed to the account owner */
+export interface LoginChallengeInput {
+  challengeId: string;
+  code: string;
 }
 
 /** Backwards-compatible alias */
@@ -133,7 +154,27 @@ export type LoginRequest = LoginInput;
 export interface AuthResult {
   user: SafeUser;
   token: string;
+  refreshToken?: string;
 }
+
+/** Returned instead of a token when a login from a new device must be verified (issue #331) */
+export interface LoginChallenge {
+  challengeRequired: true;
+  challengeId: string;
+  method: "EMAIL_OTP";
+  expiresAt: string;
+}
+
+/** Returned instead of a token when a password login must be confirmed with one of the account's passkeys (issue #273) */
+export interface PasskeyLoginChallenge {
+  challengeRequired: true;
+  method: "WEBAUTHN";
+  /** Options for navigator.credentials.get(), limited to the account's passkeys */
+  options: PublicKeyCredentialRequestOptionsJSON;
+  expiresAt: string;
+}
+
+export type LoginResult = AuthResult | LoginChallenge | PasskeyLoginChallenge;
 
 /** Standard auth API response wrapper */
 export interface AuthResponse {
@@ -191,6 +232,7 @@ export interface CreateSquadInput {
 export interface UpdateSquadInput {
   name?: string;
   players: SquadPlayerSelection[];
+  expectedUpdatedAt?: string;
 }
 
 export interface PlayerFilterQuery {
@@ -220,6 +262,59 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  isPrivate?: boolean; // default false: private leagues are invitation-only
+  payoutPreset?: "standard" | "winner-takes-all" | "top-five" | "custom";
+  customPrizeSplitsBps?: number[];
+}
+
+export interface CreateLeagueTierGroupInput {
+  name: string;
+  season: string;
+  slug?: string;
+  description?: string;
+  isActive?: boolean;
+}
+
+export interface CreateLeagueTierInput {
+  groupId: string;
+  name: string;
+  rank: number;
+  slug?: string;
+  description?: string;
+  promotionTargetTierId?: string | null;
+  relegationTargetTierId?: string | null;
+}
+
+export interface LeagueTierTransitionInput {
+  leagueId: string;
+  season: string;
+  rank: number;
+  movement?: LeagueTierMovement;
+  targetTierId?: string | null;
+}
+
+export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";
+
+/** League discovery filters (GET /leagues query string) */
+export interface LeagueSearchFilters {
+  /** Case-insensitive substring match on the league name */
+  q?: string;
+  /** Exact invite code (public leagues, or private ones the viewer already belongs to) */
+  code?: string;
+  status?: LeagueStatus;
+  scoringType?: ScoringType;
+  creatorId?: string;
+  minEntryFee?: number;
+  maxEntryFee?: number;
+  /** League capacity (maxMembers) bounds */
+  minSize?: number;
+  maxSize?: number;
+  /** Only leagues with at least one free spot */
+  hasOpenSlots?: boolean;
+  sortBy?: LeagueSortField;
+  sortOrder?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
 }
 
 export interface JoinLeagueInput {
@@ -228,6 +323,7 @@ export interface JoinLeagueInput {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;
@@ -293,6 +389,8 @@ export interface PaymentSubmissionInput {
 }
 
 export interface PaymentVerificationResult {
+  /** Verification unavailable; do not turn a transport failure into a payment failure. */
+  retryable?: boolean;
   success: boolean;
   txHash: string;
   ledgerSeq?: number;
@@ -324,7 +422,9 @@ export interface SettlementPlan {
   platformFee: number;
   netPrizePool: number;
   winners: SettlementWinner[];
+  distributionBps?: number[];
   canSettle: boolean;
+  proofHash?: string;
   unsettledReason?: string;
 }
 
@@ -346,7 +446,6 @@ export interface ReconciliationReport {
     confirmedAt: Date | null;
   }>;
 }
-
 
 
 
