@@ -114,6 +114,27 @@ describe("SorobanContractClient RPC pipeline", () => {
     assert.deepEqual(server.calls.send, []);
   });
 
+  it("returns a true zero balance but rejects failed or empty audit reads", async () => {
+    const zeroBalance = createClient(
+      createMockServer([successSimulation(nativeToScVal(0n, { type: "i128" }))])
+    );
+    assert.equal(await zeroBalance.getTokenBalanceForAudit(admin.publicKey()), 0n);
+
+    const failedRead = createClient(
+      createMockServer([
+        { id: "1", latestLedger: 100, events: [], _parsed: true, error: "RPC simulation failed" },
+      ])
+    );
+    await assert.rejects(
+      () => failedRead.getTokenBalanceForAudit(admin.publicKey()),
+      /Unable to audit token balance/
+    );
+
+    const emptyRead = createClient(createMockServer([successSimulation()]));
+    await assert.rejects(
+      () => emptyRead.getTokenBalanceForAudit(admin.publicKey()),
+      /no token balance value/
+    );
   it("returns a fee estimate for a deposit without signing or submitting", async () => {
     const server = createMockServer([successSimulation()]);
     const result = await createClient(server).simulateDepositTransaction(

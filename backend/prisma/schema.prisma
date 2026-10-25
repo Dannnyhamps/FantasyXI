@@ -814,6 +814,51 @@ model ContractEvent {
   @@map("contract_events")
 }
 
+/// Tamper-evident snapshot of a database-to-chain financial reconciliation.
+model LedgerAuditRun {
+  id                       String   @id
+  horizonLedger            Int      @map("horizon_ledger")
+  sorobanLedger            Int      @map("soroban_ledger")
+  indexedThroughLedger     Int      @map("indexed_through_ledger")
+  expectedBalanceStroops   String   @map("expected_balance_stroops")
+  observedBalanceStroops   String   @map("observed_balance_stroops")
+  discrepancyStroops       String   @map("discrepancy_stroops")
+  thresholdStroops         String   @map("threshold_stroops")
+  findingCount             Int      @map("finding_count")
+  isBalanced               Boolean  @map("is_balanced")
+  previousHash             String?  @map("previous_hash")
+  reportHash               String   @unique @map("report_hash")
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  findings LedgerAuditFinding[]
+
+  @@index([createdAt])
+  @@map("ledger_audit_runs")
+}
+
+/// Individual, traceable discrepancy or audit coverage finding.
+model LedgerAuditFinding {
+  id                    String   @id @default(uuid())
+  auditRunId            String   @map("audit_run_id")
+  severity              String
+  category              String
+  message               String
+  leagueId              String?  @map("league_id")
+  txHash                String?  @map("tx_hash")
+  ledgerSeq             Int?     @map("ledger_seq")
+  expectedStroops       String?  @map("expected_stroops")
+  observedStroops       String?  @map("observed_stroops")
+  discrepancyStroops    String?  @map("discrepancy_stroops")
+  details               Json?
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  auditRun LedgerAuditRun @relation(fields: [auditRunId], references: [id], onDelete: Cascade)
+
+  @@index([auditRunId, severity])
+  @@index([txHash])
+  @@map("ledger_audit_findings")
+}
+
 /// Tracks player price movements detected by the FPL tracking daemon
 model PlayerPriceChange {
   id        Int      @id @default(autoincrement())

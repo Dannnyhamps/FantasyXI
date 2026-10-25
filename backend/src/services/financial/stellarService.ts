@@ -134,6 +134,46 @@ export class StellarService {
     return { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger };
   }
 
+  public async getHorizonLatestLedger(): Promise<number> {
+    const page = await this.server.ledgers().order("desc").limit(1).call();
+    const ledger = page.records[0]?.sequence;
+    if (!Number.isInteger(ledger)) {
+      throw new Error("Horizon did not return a latest ledger sequence");
+    }
+    return ledger;
+  }
+
+  public async getContractLeagueStateForAudit(
+    leagueId: number | bigint
+  ): Promise<OnChainLeagueState | null> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getLeagueForAudit(leagueId);
+  }
+
+  public async getContractDepositForAudit(
+    leagueId: number | bigint,
+    participantAddress: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getDepositForAudit(leagueId, participantAddress);
+  }
+
+  public async getContractTokenBalanceForAudit(
+    addressOrContractId: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getTokenBalanceForAudit(addressOrContractId);
+  }
+
   public getSorobanClient(): SorobanContractClient | null {
     if (this.sorobanClient) return this.sorobanClient;
     try {

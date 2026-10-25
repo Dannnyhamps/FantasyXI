@@ -94,6 +94,12 @@ FantasyXI enforces a strict boundary between Web2 application gameplay and Web3 
 | **Soroban RPC Server** | `https://soroban-testnet.stellar.org` |
 | **Horizon API Server** | `https://horizon-testnet.stellar.org` |
 
+### Financial Ledger Auditing
+
+The backend runs a PostgreSQL-backed escrow reconciliation every five minutes. It compares confirmed league transactions and active member deposits with the Soroban USDC escrow balance, and cross-checks indexed deposit, settlement, refund, and claim events. Reports and their findings are stored in `ledger_audit_runs` / `ledger_audit_findings`; each report includes Horizon, Soroban, and event-indexer ledger sequences and a SHA-256 hash linked to the previous report. High-severity findings are logged as operational alerts. The auditor is read-only and never applies balance corrections.
+
+Staff can review recent reports at `GET /api/v1/admin/ledger-audits` (ADMIN or MODERATOR). Configure `LEDGER_AUDIT_THRESHOLD_STROOPS` to set the global balance alert threshold; the default is `100000` stroops (0.01 USDC). Apply the added Prisma models before deploying the auditor with `cd backend && npx prisma db push`.
+
 ---
 
 ## Core Subsystems

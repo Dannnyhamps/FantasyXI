@@ -4,6 +4,7 @@ import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
 import { lockDueGameweeks } from "../jobs/deadlineLocking.js";
 import { settleCompletedGameweeks } from "../jobs/gameweekSettlement.js";
 import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
+import { ledgerAuditService } from "../services/financial/ledgerAuditService.js";
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
@@ -62,6 +63,7 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },
   { name: "gameweek-settlement", cron: "*/5 * * * *", handler: () => settleCompletedGameweeks() },
   { name: "league-refunds", cron: "*/5 * * * *", handler: () => processLeagueRefunds() },
+  { name: "ledger-delta-audit", cron: "*/5 * * * *", handler: () => ledgerAuditService.runAudit() },
   {
     name: "price-sync",
     cron: "0 3 * * *",
