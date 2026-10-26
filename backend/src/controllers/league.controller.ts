@@ -1,11 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import {
   leagueService,
+  LeagueService,
   LeagueValidationError,
   LeagueNotFoundError,
   LeagueForbiddenError,
+  LeagueInvitationError,
+  INVITATION_DEFAULT_TTL_HOURS,
 } from "../services/league/leagueService.js";
-import { LeagueStatus } from "../types/index.js";
 import { liveService } from "../services/live/liveService.js";
 
 /**
@@ -53,24 +55,55 @@ export async function createLeague(
   }
 }
 
+/**
+ * Maps league domain errors to HTTP responses; returns false for unknown errors.
+ */
+function sendLeagueError(error: unknown, res: Response): boolean {
+  if (error instanceof LeagueNotFoundError) {
+    res.status(404).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueForbiddenError) {
+    res.status(403).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueInvitationError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueValidationError) {
+    res.status(400).json({ success: false, message: error.message });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * GET /api/v1/leagues
+ * Query: q, status, scoringType, creatorId, minEntryFee, maxEntryFee, minSize,
+ * maxSize, hasOpenSlots, sortBy, sortOrder, page, pageSize
+ */
 export async function getLeagues(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const { status, creatorId } = req.query;
-
-    const leagues = await leagueService.getLeagues({
-      status: status ? (status as LeagueStatus) : undefined,
-      creatorId: creatorId ? (creatorId as string) : undefined,
-    });
+    const filters = LeagueService.parseSearchFilters(req.query as Record<string, unknown>);
+    const result = await leagueService.getLeagues(filters, req.user?.id);
 
     res.json({
       success: true,
-      data: leagues,
+      data: result.items,
+      meta: {
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        totalPages: Math.ceil(result.total / result.pageSize),
+      },
     });
   } catch (error) {
+    if (sendLeagueError(error, res)) return;
     next(error);
   }
 }
@@ -82,7 +115,7 @@ export async function getLeagueById(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const league = await leagueService.getLeagueById(id as string);
+    const league = await leagueService.getLeagueById(id as string, req.user?.id);
 
     res.json({
       success: true,
@@ -134,6 +167,10 @@ export async function joinLeague(
       data: member,
     });
   } catch (error) {
+    if (error instanceof LeagueForbiddenError || error instanceof LeagueInvitationError) {
+      sendLeagueError(error, res);
+      return;
+    }
     if (error instanceof LeagueNotFoundError) {
       res.status(404).json({
         success: false,
@@ -159,11 +196,23 @@ export async function getLeagueMembers(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const league = await leagueService.getLeagueById(id as string);
+    const requestedPage = Number.parseInt(req.query.page as string, 10);
+    const requestedLimit = Number.parseInt(req.query.limit as string, 10);
+    const page = Number.isFinite(requestedPage) ? Math.max(1, requestedPage) : 1;
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 50;
+    const membersPage = await leagueService.getLeagueMembers(id as string, page, limit);
 
     res.json({
       success: true,
-      data: league.members,
+      data: membersPage.members,
+      pagination: {
+        page: membersPage.page,
+        limit: membersPage.limit,
+        total: membersPage.total,
+        totalPages: membersPage.totalPages,
+      },
     });
   } catch (error) {
     if (error instanceof LeagueNotFoundError) {
@@ -184,13 +233,25 @@ export async function getLeagueStandings(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const standingsData = await leagueService.getLeagueStandings(id as string);
+    const rawGameweekId = req.query.gameweekId;
+    if (rawGameweekId !== undefined && (typeof rawGameweekId !== "string" || !/^\d+$/.test(rawGameweekId))) {
+      res.status(400).json({ success: false, message: "gameweekId must be a positive integer" });
+      return;
+    }
+    const standingsData = await leagueService.getLeagueStandings(
+      id as string,
+      rawGameweekId === undefined ? undefined : Number(rawGameweekId)
+    );
 
     res.json({
       success: true,
       data: standingsData,
     });
   } catch (error) {
+    if (error instanceof LeagueValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
     if (error instanceof LeagueNotFoundError) {
       res.status(404).json({
         success: false,
@@ -284,9 +345,155 @@ export async function cancelLeague(
   }
 }
 
+// ============================================================
+// Private league invitations
+// ============================================================
+
+/**
+ * POST /api/v1/leagues/:id/invitations (creator only)
+ * Body: { expiresInHours?: number, maxUses?: number }
+ * Returns the raw token once; the client builds the shareable link from it.
+ */
+export async function createLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const raw = req.body?.expiresInHours;
+    const expiresInHours = raw === undefined ? INVITATION_DEFAULT_TTL_HOURS : Number(raw);
+    const maxUses = req.body?.maxUses === undefined ? 1 : Number(req.body.maxUses);
+
+    const invitation = await leagueService.createInvitation(
+      req.params.id as string,
+      req.user.id,
+      expiresInHours,
+      maxUses
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Invitation created. The link can be used up to its configured limit and cannot be retrieved again.",
+      data: invitation,
+    });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/leagues/:id/invitations (creator only)
+ */
+export async function listLeagueInvitations(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const invitations = await leagueService.listInvitations(req.params.id as string, req.user.id);
+    res.json({ success: true, data: invitations });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/v1/leagues/:id/invitations/:invitationId (creator only)
+ */
+export async function revokeLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    await leagueService.revokeInvitation(
+      req.params.id as string,
+      req.params.invitationId as string,
+      req.user.id
+    );
+    res.json({ success: true, message: "Invitation revoked" });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/leagues/invitations/:token (public preview)
+ */
+export async function previewLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const preview = await leagueService.previewInvitation(req.params.token as string);
+    res.json({ success: true, data: preview });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * POST /api/v1/leagues/invitations/:token/accept
+ * Body: { squadId: string }
+ */
+export async function acceptLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required to join a league" });
+      return;
+    }
+
+    const { squadId } = req.body ?? {};
+    if (!squadId || typeof squadId !== "string") {
+      res.status(400).json({ success: false, message: "squadId is required to join a league" });
+      return;
+    }
+
+    const member = await leagueService.acceptInvitation(
+      req.params.token as string,
+      req.user.id,
+      squadId
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Joined league successfully",
+      data: member,
+    });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
 /**
  * GET /api/v1/leagues/:id/live — Server-Sent Events stream of live matchday snapshots.
- * Pushes a snapshot on connect and every LIVE_FEED_INTERVAL_MS (default 15s).
+ * Pushes a snapshot on connect and every second by default. The interval is
+ * capped at 1.5s to keep provisional bonus updates within the 2s target.
  */
 export async function streamLeagueLive(
   req: Request,
@@ -317,7 +524,8 @@ export async function streamLeagueLive(
     };
     send("snapshot", first);
 
-    const intervalMs = Number(process.env.LIVE_FEED_INTERVAL_MS) || 15_000;
+    const requestedIntervalMs = Number(process.env.LIVE_FEED_INTERVAL_MS) || 1_000;
+    const intervalMs = Math.min(Math.max(requestedIntervalMs, 250), 1_500);
     const timer = setInterval(async () => {
       try {
         const snapshot = await liveService.getLeagueSnapshot(leagueId);
@@ -330,5 +538,72 @@ export async function streamLeagueLive(
     req.on("close", () => clearInterval(timer));
   } catch (error) {
     next(error);
+  }
+}
+
+import { SwissTournamentService } from "../services/league/swissTournamentService.js";
+
+export async function initSwissTournament(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const { participants, totalRounds } = req.body;
+    const tournament = SwissTournamentService.createTournament(
+      leagueId,
+      participants,
+      totalRounds
+    );
+    res.status(201).json({ success: true, data: tournament });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function getSwissStandings(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const standings = SwissTournamentService.getStandings(leagueId);
+    res.json({ success: true, data: standings });
+  } catch (error) {
+    res.status(404).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function getSwissCurrentRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const round = SwissTournamentService.getCurrentRound(leagueId);
+    res.json({ success: true, data: round });
+  } catch (error) {
+    res.status(404).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function advanceSwissRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const { gameweekId } = req.body;
+    const round = SwissTournamentService.startOrAdvanceRound(
+      leagueId,
+      Number(gameweekId || 1)
+    );
+    res.json({ success: true, data: round });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
+  }
+}
+
+export async function resolveSwissRound(req: Request, res: Response): Promise<void> {
+  try {
+    const leagueId = req.params.leagueId as string;
+    const round = req.params.round as string;
+    const { results } = req.body;
+    const state = SwissTournamentService.submitRoundResults(
+      leagueId,
+      Number(round),
+      results
+    );
+    res.json({ success: true, data: state });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message });
   }
 }

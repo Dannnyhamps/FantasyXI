@@ -1,13 +1,47 @@
+import { eventFanout } from "./services/live/eventFanout.js";
+import { attachLiveSocketServer, LIVE_SOCKET_PATH } from "./realtime/liveSocketServer.js";
+import { initRedisChat } from "./services/chat/chatService.js";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import apiV1Router from "./routes/index.js";
+import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { optionalAuth } from "./middleware/authMiddleware.js";
+import { errorHandler } from "./middleware/error.middleware.js";
+import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
+import { Permission } from "./types/index.js";
+import { ApolloServer } from "@apollo/server";
+import { expressMiddleware } from "@as-integrations/express5";
+import DataLoader from "dataloader";
+import { prisma, getReadReplicaStatus } from "./config/db.js";
+import { closeRedisClient, getRedisClient } from "./config/redis.js";
+import { preferReplicaReads } from "./middleware/readConsistency.js";
+import { financialAuditLog } from "./services/audit/financialAuditLog.js";
+import { resolvers } from "./graphql/resolvers.js";
+import { typeDefs } from "./graphql/schema.js";
+import { createComplexityPlugin } from "./graphql/complexityPlugin.js";
+import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
+import {
+  attachNotificationSocketServer,
+  NOTIFICATION_SOCKET_PATH,
+} from "./realtime/notificationSocketServer.js";
+import {
+  transactionCoordinator,
+  CoordinatedTransactionStatus,
+} from "./services/financial/transactionCoordinatorService.js";
+import { financialService } from "./services/financial/financialService.js";
+import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
+import { fplClient } from "./services/fpl/fplClient.js";
+import { partitionRotationWorker } from "./workers/partitionRotationWorker.js";
 
 dotenv.config();
 
-const app = express();
+const apolloServer = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [createComplexityPlugin(getRedisClient())],
+});
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
 app.set("trust proxy", 1);
@@ -22,8 +56,9 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(optionalAuth);
 app.use(apiRateLimiter);
+app.use(express.json());
 
 // ============================================================
 // Routes
@@ -45,57 +80,128 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const health = await getQueueHealth();
-    res.status(health.running ? 200 : 503).json({
-      success: health.running,
-      data: health,
+// Queue internals are operational data: staff and SERVICE (e.g. monitoring) only
+app.get(
+  "/api/health/queues",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const health = await getQueueHealth();
+      res.status(health.running ? 200 : 503).json({
+        success: health.running,
+        data: health,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Replica topology and lag are operational data, like queue health
+app.get(
+  "/api/health/replicas",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    const replicas = getReadReplicaStatus();
+    res.json({
+      success: true,
+      data: {
+        enabled: replicas.length > 0,
+        appRegion: process.env.APP_REGION ?? null,
+        replicas,
+      },
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
-// API v1 Routes
-app.use("/api/v1", apiV1Router);
-app.use("/api", apiV1Router);
-
+// FPL upstream circuit breaker and cache-tier metrics (issue #275), like queue health
+app.get(
+  "/api/health/fpl",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      data: { degraded: fplClient.isDegraded(), ...fplClient.getTelemetry() },
+      timestamp: new Date().toISOString(),
+    });
+  }
+);
 
 // ============================================================
 // Global error handler
 // ============================================================
 
-/**
- * Express error-handling middleware.
- *
- * Laravel equivalent: This is like your app/Exceptions/Handler.php —
- * a single place that catches all unhandled errors and returns a
- * consistent JSON response.
- *
- * The 4-parameter signature (err, req, res, next) tells Express
- * this is an error handler, not a regular middleware.
- */
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("Unhandled error:", err);
-
-  res.status(500).json({
-    success: false,
-    message:
-      process.env.NODE_ENV === "production"
-        ? "Internal server error"
-        : err.message,
-  });
-});
+app.use(errorHandler);
 
 // ============================================================
 // Start server
 // ============================================================
 
 const PORT = process.env.PORT || 5000;
+let chatSocketServer: ReturnType<typeof attachChatSocketServer> | null = null;
+let notificationSocketServer: ReturnType<typeof attachNotificationSocketServer> | null = null;
 
-app.listen(PORT, () => {
+/**
+ * Transaction coordinator (issue #260): submitted hashes are tracked in the
+ * database and polled until final. A deposit that lands after the wallet gave
+ * up is pushed through the normal on-chain verification.
+ */
+function startTransactionCoordinator(): void {
+  financialService.setTransactionTracker(transactionCoordinator);
+  transactionCoordinator.onFinalized("DEPOSIT", async (change) => {
+    if (change.status !== CoordinatedTransactionStatus.SUCCESS || !change.userId || !change.leagueId) return;
+    await financialService.verifyAndConfirmPayment(change.userId, change.leagueId, change.txHash);
+  });
+  if (process.env.DATABASE_URL && process.env.TX_COORDINATOR_ENABLED !== "false") {
+    transactionCoordinator.start();
+  }
+}
+
+let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
+let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
+
+async function startServer(): Promise<void> {
+  if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
+    partitionRotationWorker.start();
+  }
+  await eventFanout.start();
+  chatAdapter = await initRedisChat();
+  await apolloServer.start();
+  app.use(
+    "/graphql",
+    // The schema is query-only, so GraphQL reads may be served by a replica
+    preferReplicaReads,
+    express.json(),
+    expressMiddleware(apolloServer, {
+      context: async () => ({
+        loaders: {
+          users: new DataLoader(async (ids) => {
+            const records = await prisma.user.findMany({
+              where: { id: { in: [...ids].map(String) } },
+              include: { wallet: true, squads: true, createdLeagues: true },
+            });
+            const byId = new Map(records.map((record) => [record.id, record]));
+            return ids.map((id) => byId.get(String(id)) ?? null);
+          }),
+          players: new DataLoader(async (ids) => {
+            const records = await prisma.player.findMany({
+              where: { id: { in: [...ids].map(Number) } },
+              include: { team: true },
+            });
+            const byId = new Map(records.map((record) => [record.id, record]));
+            return ids.map((id) => byId.get(Number(id)) ?? null);
+          }),
+        },
+      }),
+    }),
+  );
+
+  const httpServer = app.listen(PORT, () => {
   console.log(`
   ⚽ FantasyXI API Server
   ────────────────────────
@@ -111,8 +217,32 @@ app.listen(PORT, () => {
       console.error("[jobs] Failed to start job queue:", error)
     );
   }
+  });
+
+  // Real-time league chat and user notifications share the HTTP server's port
+  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH, LIVE_SOCKET_PATH] });
+  notificationSocketServer = attachNotificationSocketServer(httpServer);
+  liveSocketServer = attachLiveSocketServer(httpServer);
+  startTransactionCoordinator();
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start FantasyXI API:", error);
+  process.exitCode = 1;
 });
 
 process.on("SIGTERM", () => {
-  stopJobQueue().finally(() => process.exit(0));
+  partitionRotationWorker.stop();
+  // Persist buffered financial audit entries before exiting
+  stopJobQueue()
+    .finally(() => transactionCoordinator.stop())
+    .finally(() => jwtKeyRotationService.stop())
+    .finally(() => chatSocketServer?.close())
+    .finally(() => notificationSocketServer?.close())
+    .finally(() => financialAuditLog.close())
+    .finally(() => liveSocketServer?.close())
+    .finally(() => chatAdapter?.close())
+    .finally(() => eventFanout.close())
+    .finally(() => closeRedisClient())
+    .finally(() => process.exit(0));
 });

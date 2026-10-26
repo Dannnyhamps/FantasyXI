@@ -1,14 +1,45 @@
+import { sessionRegistryService } from "./sessionRegistryService.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma as defaultPrisma } from "../../config/db.js";
 import { signAccessToken } from "../../config/jwt.js";
+import { RefreshTokenService } from "./refreshTokenService.js";
 import {
   RegisterInput,
   LoginInput,
+  LoginChallengeInput,
+  LoginResult,
+  PasskeyLoginChallenge,
   SafeUser,
   AuthResult,
   UserRole,
 } from "../../types/index.js";
+import { eventBus, EventBus } from "../events/eventBus.js";
+import { USER_SIGNED_UP_EVENT } from "../events/domainEvents.js";
+// Imported for its side effect: subscribes the signup analytics handler to
+// USER_SIGNED_UP_EVENT (issue #118).
+import "../events/userEventHandlers.js";
+import {
+  loginSecurityService as defaultLoginSecurityService,
+  LoginSecurityService,
+} from "../security/loginSecurityService.js";
+import type { GeoPoint } from "../security/geoVelocity.js";
+import {
+  accountSignalRecorder as defaultSignalRecorder,
+  AccountSignalRecorder,
+} from "../security/accountSignals.js";
+import { webAuthnService as defaultWebAuthnService, WebAuthnService } from "./webAuthnService.js";
+
+/** Request-derived context used for anomalous-login detection (issues #117, #331). */
+export interface AuthRequestContext {
+  ip: string;
+  userAgent?: string | null;
+  /** IP-derived location from trusted edge headers, when configured */
+  location?: GeoPoint | null;
+}
+
+/** Passkeys loaded with the user on login; only what step-up options need. */
+const PASSKEY_STEP_UP_SELECT = { select: { id: true, transports: true } } as const;
 
 /**
  * Custom error classes for Authentication domain rules.
@@ -37,6 +68,16 @@ export class AuthUnauthorizedError extends Error {
   }
 }
 
+/** A correct password was refused because the login looks like account takeover (issue #331). */
+export class AuthLoginBlockedError extends Error {
+  constructor(
+    message: string = "This sign-in was blocked because it came from an implausibly distant location. Check your email for details."
+  ) {
+    super(message);
+    this.name = "AuthLoginBlockedError";
+  }
+}
+
 export class AuthNotFoundError extends Error {
   constructor(message: string = "User not found") {
     super(message);
@@ -54,6 +95,8 @@ export function toSafeUser(user: {
   username: string;
   name?: string | null;
   role?: UserRole | string | null;
+  passwordHash?: string | null;
+  googleId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): SafeUser {
@@ -63,9 +106,27 @@ export function toSafeUser(user: {
     username: user.username,
     name: user.name ?? null,
     role: (user.role as UserRole | undefined) ?? UserRole.USER,
+    // Which sign-in methods the account can use; never exposes the secrets themselves
+    authProviders: {
+      password: Boolean(user.passwordHash),
+      google: Boolean(user.googleId),
+    },
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
+}
+
+/** Prisma unique-constraint violation (e.g. a concurrent insert of the same googleId). */
+function isUniqueViolation(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "P2002";
+}
+
+/** Verified Google identity passed to the account linking operations. */
+export interface GoogleIdentityInput {
+  googleId: string;
+  email: string;
+  name?: string | null;
+  emailVerified: boolean;
 }
 
 /**
@@ -78,8 +139,14 @@ export function toSafeUser(user: {
  *   RegistersUsers, AuthenticatesUsers, Hash::make, Hash::check.
  */
 export class AuthService {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = defaultPrisma) {}
+  constructor(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private readonly db: any = defaultPrisma,
+    private readonly events: EventBus = eventBus,
+    private readonly security: LoginSecurityService = defaultLoginSecurityService,
+    private readonly passkeys: WebAuthnService = defaultWebAuthnService,
+    private readonly signals: AccountSignalRecorder = defaultSignalRecorder
+  ) {}
 
   /**
    * Normalizes an email address consistently.
@@ -144,7 +211,7 @@ export class AuthService {
   /**
    * Registers a new user account with bcrypt hashed password.
    */
-  public async register(input: RegisterInput): Promise<AuthResult> {
+  public async register(input: RegisterInput, context?: AuthRequestContext): Promise<AuthResult> {
     const { normalizedEmail, normalizedUsername } =
       this.validateRegisterInput(input);
 
@@ -206,25 +273,47 @@ export class AuthService {
       }
     }
 
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
+    });
     const safeUser = toSafeUser(user);
-    const token = signAccessToken({
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, session.id);
+
+    // Best-effort: a signup analytics/notification subscriber failing must
+    // never fail registration itself, so this uses `publish` (which never
+    // throws) rather than `publishOrThrow` - see events/eventBus.ts.
+    await this.events.publish(USER_SIGNED_UP_EVENT, {
       userId: user.id,
       email: user.email,
       username: user.username,
-      role: user.role ?? UserRole.USER,
     });
 
     return {
       user: safeUser,
-      token,
+      ...issued,
     };
   }
 
   /**
    * Authenticates user with email and password.
    * Returns generic 401 message on any credential mismatch to prevent enumeration.
+   *
+   * `context` (client IP / user agent / location) is optional so existing
+   * callers and tests that don't have request metadata keep working
+   * unchanged; when provided, it drives the login security checks (see
+   * services/security/loginSecurityService.ts): failed attempts are tracked
+   * per email for spike detection (#117), an impossible-travel login is
+   * refused with AuthLoginBlockedError, and a login from an unrecognized
+   * device returns a step-up challenge instead of a token (#331).
+   *
+   * An account with a registered passkey always answers a correct password
+   * with a WEBAUTHN step-up challenge instead of a token (#273), with or
+   * without `context`: the passkey is the account's second factor.
    */
-  public async login(input: LoginInput): Promise<AuthResult> {
+  public async login(input: LoginInput): Promise<AuthResult>;
+  public async login(input: LoginInput, context: AuthRequestContext | undefined): Promise<LoginResult>;
+  public async login(input: LoginInput, context?: AuthRequestContext): Promise<LoginResult> {
     if (!input.email || !input.password) {
       throw new AuthUnauthorizedError("Invalid email or password");
     }
@@ -233,10 +322,14 @@ export class AuthService {
 
     const user = await this.db.user.findUnique({
       where: { email: normalizedEmail },
+      include: { webAuthnCredentials: PASSKEY_STEP_UP_SELECT },
     });
 
     // Timing-safe / generic rejection if user does not exist or has no password set (e.g. Google-only user)
     if (!user || !user.passwordHash) {
+      if (context) {
+        await this.security.recordFailedLogin(normalizedEmail, context.ip);
+      }
       throw new AuthUnauthorizedError("Invalid email or password");
     }
 
@@ -247,20 +340,109 @@ export class AuthService {
     );
 
     if (!isPasswordValid) {
+      if (context) {
+        await this.security.recordFailedLogin(normalizedEmail, context.ip);
+      }
       throw new AuthUnauthorizedError("Invalid email or password");
     }
 
-    const safeUser = toSafeUser(user);
-    const token = signAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-      role: user.role ?? UserRole.USER,
-    });
+    // A phishing-resistant, device-bound second factor supersedes the
+    // new-device email code and the impossible-travel heuristic
+    const passkeys: Array<{ id: string; transports: string[] }> = user.webAuthnCredentials ?? [];
+    if (passkeys.length > 0) {
+      const { options, expiresAt } = await this.passkeys.generateStepUpOptions(user.id, passkeys);
+      const challenge: PasskeyLoginChallenge = {
+        challengeRequired: true,
+        method: "WEBAUTHN",
+        options,
+        expiresAt: expiresAt.toISOString(),
+      };
+      return challenge;
+    }
 
+    if (context) {
+      const assessment = await this.security.assessLogin({
+        userId: user.id,
+        email: user.email,
+        username: user.username,
+        ip: context.ip,
+        userAgent: context.userAgent,
+        deviceFingerprint: typeof input.deviceFingerprint === "string" ? input.deviceFingerprint : null,
+        location: context.location,
+      });
+      if (assessment.decision === "BLOCK") {
+        throw new AuthLoginBlockedError();
+      }
+      if (assessment.decision === "CHALLENGE") {
+        return {
+          challengeRequired: true,
+          challengeId: assessment.challengeId,
+          method: "EMAIL_OTP",
+          expiresAt: assessment.expiresAt.toISOString(),
+        };
+      }
+      this.signals.record(user.id, { ...context, deviceFingerprint: input.deviceFingerprint });
+    }
+
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
+    });
+    return this.issueAuthResult(user, session.id);
+  }
+
+  /**
+   * Completes a passkey sign-in (#273): usernameless passwordless login, or
+   * the WEBAUTHN step-up that followed a verified password.
+   */
+  public async loginWithPasskey(
+    response: unknown,
+    context: AuthRequestContext & { deviceFingerprint?: string | null }
+  ): Promise<AuthResult> {
+    const { userId } = await this.passkeys.verifyAuthentication(response, context);
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    this.signals.record(user.id, context);
+    return this.issueAuthResult(user);
+  }
+
+  /**
+   * Completes a login that was answered with a step-up challenge: a valid
+   * code issues the token and remembers the device for future logins.
+   * `context` records the sign-in network for Sybil analysis (#274).
+   */
+  public async verifyLoginChallenge(input: LoginChallengeInput, context?: AuthRequestContext): Promise<AuthResult> {
+    if (typeof input.challengeId !== "string" || typeof input.code !== "string" || !/^\d{6}$/.test(input.code)) {
+      throw new AuthValidationError("A challengeId and a 6-digit code are required");
+    }
+
+    const verification = await this.security.verifyChallenge(input.challengeId, input.code);
+    if (!verification.verified) {
+      throw new AuthUnauthorizedError(
+        verification.attemptsRemaining > 0
+          ? `Incorrect verification code. ${verification.attemptsRemaining} attempt(s) remaining.`
+          : "This verification code has expired or been used up. Please sign in again."
+      );
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: verification.userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    if (context) {
+      this.signals.record(user.id, { ip: context.ip });
+    }
+    return this.issueAuthResult(user);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async issueAuthResult(user: any, sessionId?: string): Promise<AuthResult> {
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, sessionId);
     return {
-      user: safeUser,
-      token,
+      user: toSafeUser(user),
+      ...issued,
     };
   }
 
@@ -276,12 +458,7 @@ export class AuthService {
    * 4. If neither matches -> creates new user with passwordHash = null.
    * 5. Always issues FantasyXI JWT access token.
    */
-  public async handleGoogleAuth(input: {
-    googleId: string;
-    email: string;
-    name?: string | null;
-    emailVerified: boolean;
-  }): Promise<AuthResult> {
+  public async handleGoogleAuth(input: GoogleIdentityInput): Promise<AuthResult> {
     if (!input.googleId) {
       throw new AuthValidationError("Google ID is required");
     }
@@ -298,14 +475,7 @@ export class AuthService {
     });
 
     if (user) {
-      const safeUser = toSafeUser(user);
-      const token = signAccessToken({
-        userId: user.id,
-        email: user.email,
-        username: user.username,
-        role: user.role ?? UserRole.USER,
-      });
-      return { user: safeUser, token };
+      return { user: toSafeUser(user), token: signAccessToken({ userId: user.id, email: user.email, username: user.username, role: user.role ?? UserRole.USER }) };
     }
 
     // 2. Check if a user with this email already exists
@@ -347,29 +517,175 @@ export class AuthService {
         finalUsername = `${base}_${crypto.randomBytes(2).toString("hex")}`;
       }
 
-      user = await this.db.user.create({
-        data: {
-          email: normalizedEmail,
-          name: input.name ? input.name.trim() : null,
-          googleId: input.googleId,
-          username: finalUsername,
-          passwordHash: null,
-        },
-      });
+      try {
+        user = await this.db.user.create({
+          data: {
+            email: normalizedEmail,
+            name: input.name ? input.name.trim() : null,
+            googleId: input.googleId,
+            username: finalUsername,
+            passwordHash: null,
+          },
+        });
+      } catch (error) {
+        // A concurrent first sign-in with the same Google account won the race
+        if (!isUniqueViolation(error)) throw error;
+        user = await this.db.user.findUnique({
+          where: { googleId: input.googleId },
+        });
+        if (!user) {
+          throw new AuthConflictError(
+            "An account with this email already exists. Sign in and link Google from your profile."
+          );
+        }
+      }
     }
 
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
+    });
     const safeUser = toSafeUser(user);
     const token = signAccessToken({
       userId: user.id,
       email: user.email,
       username: user.username,
       role: user.role ?? UserRole.USER,
+      sessionId: session.id,
     });
 
     return {
       user: safeUser,
       token,
     };
+  }
+
+  /**
+   * Links a Google identity to an already signed-in account.
+   *
+   * Unlike sign-in, the Google email does not have to match the account email:
+   * the user proved ownership of both by being signed in and completing the
+   * Google consent screen. Rules:
+   * - the Google email must be verified;
+   * - a Google account can belong to only one FantasyXI account;
+   * - an account already linked to a different Google account must unlink first.
+   * Linking the same Google account again is a no-op.
+   */
+  public async linkGoogleAccount(
+    userId: string,
+    identity: GoogleIdentityInput
+  ): Promise<SafeUser> {
+    if (!identity.googleId) {
+      throw new AuthValidationError("Google ID is required");
+    }
+    if (!identity.emailVerified) {
+      throw new AuthValidationError("Google account email is not verified");
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+
+    if (user.googleId === identity.googleId) {
+      return toSafeUser(user);
+    }
+    if (user.googleId) {
+      throw new AuthConflictError(
+        "Your account is already linked to a different Google account. Unlink it first."
+      );
+    }
+
+    const owner = await this.db.user.findUnique({
+      where: { googleId: identity.googleId },
+    });
+    if (owner && owner.id !== userId) {
+      throw new AuthConflictError(
+        "This Google account is already linked to another FantasyXI account."
+      );
+    }
+
+    try {
+      const updated = await this.db.user.update({
+        where: { id: userId },
+        data: {
+          googleId: identity.googleId,
+          name: user.name ?? identity.name ?? null,
+        },
+      });
+      return toSafeUser(updated);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new AuthConflictError(
+          "This Google account is already linked to another FantasyXI account."
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Removes the Google identity from an account. Refused while Google is the
+   * only way to sign in, so users cannot lock themselves out.
+   */
+  public async unlinkGoogleAccount(userId: string): Promise<SafeUser> {
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    if (!user.googleId) {
+      return toSafeUser(user);
+    }
+    if (!user.passwordHash) {
+      throw new AuthConflictError(
+        "Set a password before unlinking Google, otherwise you will not be able to sign in."
+      );
+    }
+
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data: { googleId: null },
+    });
+    return toSafeUser(updated);
+  }
+
+  /**
+   * Sets a password so a Google-only account can also sign in with email and
+   * password, or changes an existing password (the current one is required).
+   */
+  public async setPassword(
+    userId: string,
+    input: { password?: string; currentPassword?: string }
+  ): Promise<SafeUser> {
+    if (!input.password || typeof input.password !== "string") {
+      throw new AuthValidationError("Password is required");
+    }
+    if (input.password.length < MIN_PASSWORD_LENGTH) {
+      throw new AuthValidationError(
+        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
+      );
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+
+    if (user.passwordHash) {
+      const currentMatches =
+        typeof input.currentPassword === "string" &&
+        (await bcrypt.compare(input.currentPassword, user.passwordHash));
+      if (!currentMatches) {
+        throw new AuthUnauthorizedError("Current password is incorrect");
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(input.password, BCRYPT_SALT_ROUNDS);
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    });
+    return toSafeUser(updated);
   }
 
   /**
