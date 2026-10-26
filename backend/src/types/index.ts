@@ -26,6 +26,10 @@ import {
   ChipType,
   UserRole,
 } from "@prisma/client";
+import type {
+  LeagueScoringConfig,
+  ScoringPreset,
+} from "../models/leagueScoringConfig.js";
 
 export { Role, Permission } from "../config/permissions.js";
 import type { Role } from "../config/permissions.js";
@@ -262,6 +266,8 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  scoringConfig?: LeagueScoringConfig;
+  scoringPreset?: ScoringPreset;
   isPrivate?: boolean; // default false: private leagues are invitation-only
   payoutPreset?: "standard" | "winner-takes-all" | "top-five" | "custom";
   customPrizeSplitsBps?: number[];

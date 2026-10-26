@@ -589,6 +589,10 @@ export class FplSyncService {
           yellowCards: s.yellowCards,
           redCards: s.redCards,
           saves: s.saves,
+          goalsConceded: s.goalsConceded,
+          ownGoals: s.ownGoals,
+          penaltiesSaved: s.penaltiesSaved,
+          penaltiesMissed: s.penaltiesMissed,
           bps: s.bps,
           bonus: s.bonus,
           totalPoints: s.totalPoints,
@@ -615,6 +619,31 @@ export class FplSyncService {
         continue;
       }
 
+      const stats = normalizePlayerStats(rawElement);
+      const payload = {
+        minutes: stats.minutes,
+        goals: stats.goals,
+        assists: stats.assists,
+        cleanSheet: stats.cleanSheet,
+        yellowCards: stats.yellowCards,
+        redCards: stats.redCards,
+        saves: stats.saves,
+        goalsConceded: stats.goalsConceded,
+        ownGoals: stats.ownGoals,
+        penaltiesSaved: stats.penaltiesSaved,
+        penaltiesMissed: stats.penaltiesMissed,
+        bonus: stats.bonus,
+        totalPoints: stats.totalPoints,
+      };
+
+      const incomingHash = generateHash(payload);
+      const existingHash = existingStatsHashes.get(localPlayerId);
+
+      if (incomingHash !== existingHash) {
+        statsOps.push(
+          prisma.playerGameweekStats.upsert({
+            where: {
+              playerId_gameweekId: {
       const statsArray = normalizePlayerStats(rawElement);
 
       for (const stats of statsArray) {

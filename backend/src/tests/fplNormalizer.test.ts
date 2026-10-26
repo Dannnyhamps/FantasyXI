@@ -140,6 +140,10 @@ describe("FPL Normalizer", () => {
         goals_scored: 2,
         assists: 1,
         clean_sheets: 0,
+        goals_conceded: 2,
+        own_goals: 1,
+        penalties_saved: 1,
+        penalties_missed: 2,
         yellow_cards: 0,
         red_cards: 0,
         saves: 0,
@@ -170,6 +174,10 @@ describe("FPL Normalizer", () => {
     assert.equal(stats.goals, 2);
     assert.equal(stats.assists, 1);
     assert.equal(stats.cleanSheet, false);
+    assert.equal(stats.goalsConceded, 2);
+    assert.equal(stats.ownGoals, 1);
+    assert.equal(stats.penaltiesSaved, 1);
+    assert.equal(stats.penaltiesMissed, 2);
     assert.equal(stats.bps, 29);
     assert.equal(stats.bonus, 3);
     assert.equal(stats.totalPoints, 16); // 2 + 8 + 3 + 3 = 16 (test logic is just sum of points)
