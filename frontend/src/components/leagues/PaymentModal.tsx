@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
+import { useWallet, type WalletProviderId } from "@/context/WalletContext";
 import {
   IconClose,
   IconCopy,
@@ -12,13 +13,9 @@ import {
   IconWallet,
   IconChevronDown,
   IconChevronUp,
-  IconRefresh,
 } from "@/components/ui/Icons";
-import {
-  isFreighterInstalled,
-  connectFreighter,
-  depositToSorobanEscrow,
-} from "@/lib/stellar/sorobanDeposit";
+import { depositToSorobanEscrow, SorobanDepositTimeoutError } from "@/lib/stellar/sorobanDeposit";
+import { mapDepositErrorToMessage } from "@/lib/stellar/depositErrorMessage";
 
 export interface PaymentModalProps {
   isOpen: boolean;
@@ -27,7 +24,7 @@ export interface PaymentModalProps {
   leagueName: string;
   squadId: string;
   entryFee: number;
-  onPaymentSuccess?: () => void;
+  onPaymentSuccess?: (deposit: { txHash: string; ledgerSeq?: number }) => void;
 }
 
 interface PaymentRequirementData {
@@ -71,20 +68,29 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [hasFreighter, setHasFreighter] = useState<boolean>(true);
   const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
+  const [showWalletPicker, setShowWalletPicker] = useState<boolean>(false);
+  // A deposit that was signed and submitted but whose confirmation we lost track of
+  // (network drop / RPC timeout). Retrying must re-check this hash, never resubmit.
+  const [pendingTxHash, setPendingTxHash] = useState<string | null>(null);
+  const [isReconciling, setIsReconciling] = useState<boolean>(false);
+  const {
+    wallets,
+    selectedWallet,
+    publicKey,
+    isConnecting,
+    error: walletError,
+    connect,
+    disconnect,
+    signTransaction,
+  } = useWallet();
 
   // Advanced / manual hash fallback state
   const [showManualFallback, setShowManualFallback] = useState<boolean>(false);
   const [manualTxHash, setManualTxHash] = useState<string>("");
   const [manualAddress, setManualAddress] = useState<string>("");
   const [isManualVerifying, setIsManualVerifying] = useState<boolean>(false);
-
-  // Check Freighter on mount
-  useEffect(() => {
-    isFreighterInstalled().then((installed) => setHasFreighter(installed));
-  }, []);
 
   // Fetch requirement upon opening
   useEffect(() => {
@@ -94,6 +100,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setIsLoadingReq(true);
       setErrorMsg(null);
       setStep("idle");
+      setPendingTxHash(null);
       try {
         const res = await api.get<{ success: boolean; data: PaymentRequirementData }>(
           `/api/v1/leagues/${leagueId}/payment-requirement?squadId=${squadId}`
@@ -131,30 +138,25 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   /**
    * Primary canonical flow: deposit via Freighter Soroban invocation
    */
-  const handleFreighterDeposit = async () => {
+  const handleWalletDeposit = async () => {
+    if (!selectedWallet || !publicKey) {
+      setShowWalletPicker(true);
+      return;
+    }
+
     setErrorMsg(null);
+    setPendingTxHash(null);
     setStep("connecting");
-    setStatusMessage("Connecting to Freighter wallet...");
+    setStatusMessage("Preparing wallet transaction...");
 
     try {
-      // 1. Connect Freighter
-      const { publicKey, network } = await connectFreighter();
       setConnectedAccount(publicKey);
-
-      if (network && !network.toUpperCase().includes("TESTNET")) {
-        setErrorMsg(
-          `Freighter is currently set to ${network}. Please switch to Stellar TESTNET in Freighter settings.`
-        );
-        setStep("idle");
-        return;
-      }
-
-      // 2. Deposit into Soroban Escrow
       setStep("simulating");
       const depositResult = await depositToSorobanEscrow({
         escrowContractId: effectiveContractId,
         leagueId,
         userPublicKey: publicKey,
+        signTransaction,
         onProgress: (status) => {
           setStatusMessage(status);
           if (status.includes("Simulating")) setStep("simulating");
@@ -180,7 +182,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       const verifyRes = await api.post<{
         success: boolean;
         message: string;
-        data?: any;
+        data?: unknown;
       }>(`/api/v1/leagues/${leagueId}/verify-payment`, {
         stellarTxHash: txHash,
       });
@@ -188,7 +190,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       if (verifyRes?.success) {
         setStep("success");
         setTimeout(() => {
-          onPaymentSuccess?.();
+          onPaymentSuccess?.({ txHash, ledgerSeq: depositResult.ledgerSeq });
           onClose();
         }, 2200);
       } else {
@@ -196,18 +198,66 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           verifyRes?.message || "Payment verification failed on backend"
         );
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setStep("idle");
-      const msg = err?.message || String(err);
-      if (msg.includes("User declined") || msg.includes("rejected")) {
-        setErrorMsg("Signature request was rejected in Freighter.");
-      } else if (msg.includes("trustline") || msg.includes("balance")) {
-        setErrorMsg(
-          "Insufficient Testnet USDC balance or missing trustline in Freighter."
-        );
-      } else {
-        setErrorMsg(msg);
+
+      if (err instanceof SorobanDepositTimeoutError) {
+        // The deposit may have actually succeeded on-chain; keep the hash around so
+        // "retry" re-checks it via the backend instead of signing a brand new payment.
+        setPendingTxHash(err.txHash);
+        setErrorMsg(err.message);
+        return;
       }
+
+      setErrorMsg(mapDepositErrorToMessage(err));
+    }
+  };
+
+  /**
+   * Retry path for a deposit whose confirmation timed out client-side. Re-checks the
+   * Soroban escrow contract for this member's deposit instead of signing a new
+   * transaction, so a slow confirmation can never result in a double payment.
+   */
+  const handleReconcileRetry = async () => {
+    setErrorMsg(null);
+    setIsReconciling(true);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        message: string;
+        data?: { txHash?: string };
+      }>(`/api/v1/leagues/${leagueId}/reconcile-deposit`);
+
+      if (res?.success) {
+        setStep("success");
+        setConfirmedTxHash(pendingTxHash);
+        setTimeout(() => {
+          onPaymentSuccess?.({ txHash: pendingTxHash || "" });
+          onClose();
+        }, 2200);
+      } else {
+        setErrorMsg(
+          res?.message ||
+            "No confirmed deposit was found yet. If you just submitted the transaction, wait a few seconds and retry."
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setErrorMsg(err.message || "Could not verify your deposit. Please retry.");
+      } else {
+        setErrorMsg("Could not reach the FantasyXI backend to reconcile your deposit.");
+      }
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
+  const handleWalletConnect = async (walletId: WalletProviderId) => {
+    try {
+      await connect(walletId);
+      setShowWalletPicker(false);
+    } catch {
+      // The provider exposes the detailed error through WalletContext.
     }
   };
 
@@ -240,7 +290,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       const verifyRes = await api.post<{
         success: boolean;
         message: string;
-        data?: any;
+        data?: unknown;
       }>(`/api/v1/leagues/${leagueId}/verify-payment`, {
         stellarTxHash: cleanHash,
       });
@@ -249,7 +299,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         setStep("success");
         setConfirmedTxHash(cleanHash);
         setTimeout(() => {
-          onPaymentSuccess?.();
+          onPaymentSuccess?.({ txHash: cleanHash });
           onClose();
         }, 2000);
       } else {
@@ -400,37 +450,79 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               )}
 
-              {/* Primary Freighter Deposit Action */}
-              {!isWorking && (
+              {/* Retry state: a deposit whose confirmation timed out. Never resubmits a
+                  new payment — only re-checks the escrow contract for the same deposit. */}
+              {!isWorking && pendingTxHash && (
+                <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+                  <p className="text-xs text-amber-300 font-semibold">
+                    Your transaction may still be confirming on-chain.
+                  </p>
+                  <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] font-mono text-slate-400 break-all">
+                    Tx: {pendingTxHash}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="lg"
+                    onClick={handleReconcileRetry}
+                    isLoading={isReconciling}
+                    disabled={isReconciling}
+                    className="w-full justify-center uppercase font-bold tracking-wide text-xs py-3.5"
+                  >
+                    Retry: Check Deposit Status
+                  </Button>
+                </div>
+              )}
+
+              {/* Unified wallet connection and deposit action */}
+              {!isWorking && !pendingTxHash && (
                 <div className="space-y-2.5 pt-1">
-                  {!hasFreighter && (
-                    <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between">
-                      <span>Freighter extension not detected.</span>
-                      <a
-                        href="https://www.freighter.app"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-emerald-400 underline font-semibold hover:text-emerald-300"
-                      >
-                        Install Freighter
-                      </a>
+                  {selectedWallet && publicKey ? (
+                    <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30">
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-wider text-emerald-400 font-bold">
+                          {wallets.find((wallet) => wallet.id === selectedWallet)?.name || selectedWallet} connected
+                        </div>
+                        <div className="truncate text-[11px] font-mono text-slate-300 mt-1">{publicKey}</div>
+                      </div>
+                      <button type="button" onClick={() => disconnect()} className="shrink-0 text-[11px] text-slate-400 hover:text-white underline">
+                        Change
+                      </button>
                     </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowWalletPicker(true)}
+                      className="w-full flex items-center justify-between p-3 rounded-lg bg-slate-950/70 border border-slate-700 hover:border-emerald-500/50 transition-colors text-left"
+                    >
+                      <span>
+                        <span className="block text-xs font-bold text-white">Connect a Stellar wallet</span>
+                        <span className="block text-[11px] text-slate-500 mt-0.5">Freighter, Albedo, xBull, or WalletConnect</span>
+                      </span>
+                      <IconWallet className="w-4 h-4 text-emerald-400" />
+                    </button>
                   )}
 
                   <Button
                     type="button"
                     variant="primary"
                     size="lg"
-                    onClick={handleFreighterDeposit}
-                    disabled={isWorking}
+                    onClick={handleWalletDeposit}
+                    disabled={isWorking || !publicKey}
                     className="w-full justify-center uppercase font-bold tracking-wide text-xs py-3.5"
                   >
                     <IconWallet className="w-4 h-4 mr-2" />
-                    Pay {requirement?.entryFee ?? entryFee} USDC with Freighter
+                    Pay {requirement?.entryFee ?? entryFee} USDC
                   </Button>
                   <p className="text-[11px] text-slate-500 text-center">
-                    Invokes <code className="text-emerald-400">deposit(participant, league_id)</code> directly on the Soroban smart contract.
+                    Invokes <code className="text-emerald-400">deposit(participant, league_id)</code> directly through your selected wallet.
                   </p>
+                </div>
+              )}
+
+              {walletError && (
+                <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs">
+                  {walletError}
                 </div>
               )}
 
@@ -499,6 +591,45 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </>
           )}
         </div>
+
+        {showWalletPicker && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center p-4 bg-slate-950/95">
+            <div className="w-full max-w-sm space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-bold text-white">Connect wallet</h3>
+                  <p className="text-xs text-slate-400 mt-1">Choose how to sign your Soroban deposit.</p>
+                </div>
+                <button type="button" onClick={() => setShowWalletPicker(false)} className="p-1.5 text-slate-400 hover:text-white" aria-label="Close wallet picker">
+                  <IconClose className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-2">
+                {wallets.map((wallet) => (
+                  <button
+                    key={wallet.id}
+                    type="button"
+                    disabled={isConnecting || !wallet.isAvailable}
+                    onClick={() => handleWalletConnect(wallet.id)}
+                    className="w-full flex items-center gap-3 p-3 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/50 disabled:opacity-50 disabled:cursor-not-allowed text-left"
+                  >
+                    <img src={wallet.icon} alt="" className="w-8 h-8 rounded-lg" />
+                    <span className="flex-1">
+                      <span className="block text-sm font-semibold text-white">{wallet.name}</span>
+                      <span className="block text-[11px] text-slate-500">{wallet.isAvailable ? "Available" : "Install or enable wallet"}</span>
+                    </span>
+                    {selectedWallet === wallet.id && <IconCheck className="w-4 h-4 text-emerald-400" />}
+                  </button>
+                ))}
+              </div>
+              {!wallets.some((wallet) => wallet.id === "wallet_connect") && (
+                <p className="text-[11px] text-slate-500 border-t border-slate-800 pt-3">
+                  WalletConnect requires <code className="text-emerald-400">NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID</code> to be configured.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Footer info */}
         <div className="p-3.5 border-t border-pitch-border bg-slate-950/80 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">

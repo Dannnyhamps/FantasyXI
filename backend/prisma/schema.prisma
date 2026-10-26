@@ -54,6 +54,18 @@ enum ScoringType {
   HEAD_TO_HEAD
 }
 
+enum MatchmakingStatus {
+  QUEUED
+  MATCHED
+}
+
+/// The season-end movement applied to a league across tier ladder boundaries.
+enum LeagueTierMovement {
+  STAY
+  PROMOTE
+  RELEGATE
+}
+
 /// FPL chips a squad can play once per season
 enum ChipType {
   TRIPLE_CAPTAIN
@@ -92,9 +104,44 @@ enum TransactionStatus {
 enum SorobanSubmissionStatus {
   PENDING_VERIFICATION
   SUBMITTED
+/// Lifecycle of a payout isolated in the dead-letter queue.
+/// PENDING: awaiting automatic (recoverable only) or manual retry.
+/// RETRYING: claimed by a retry attempt; guards against concurrent double payouts.
+/// RESOLVED: funds were delivered by a later retry.
+/// DISCARDED: closed by an admin without payout (e.g. settled off-platform).
+enum FailedPayoutStatus {
+  PENDING
+  RETRYING
+  RESOLVED
+  DISCARDED
+}
+
+/// Lifecycle of an on-chain transaction watched by the transaction coordinator.
+/// PENDING: submitted, not yet final (getTransaction returns NOT_FOUND or the RPC is unreachable).
+/// SUCCESS / FAILED: final ledger outcome reported by Soroban RPC.
+/// DROPPED: never reached a ledger before the confirmation timeout; an admin is alerted.
+enum CoordinatedTransactionStatus {
+  PENDING
   SUCCESS
   FAILED
   DROPPED
+}
+
+/// Financial operations recorded in the append-only audit log
+enum FinancialAuditAction {
+  DEPOSIT_SUBMITTED
+  DEPOSIT_CONFIRMED
+  DEPOSIT_FAILED
+  WITHDRAWAL
+  REFUND
+  FEE_EXTRACTION
+  PAYOUT_DEAD_LETTERED
+  PAYOUT_RETRY_SCHEDULED
+  PAYOUT_RETRY_SUCCEEDED
+  PAYOUT_RETRY_FAILED
+  PAYOUT_DISCARDED
+  RECONCILIATION_BALANCED
+  RECONCILIATION_DISCREPANCY
 }
 
 // ============================================================
@@ -104,29 +151,55 @@ enum SorobanSubmissionStatus {
 /// A registered user on the platform.
 /// Laravel equivalent: the `users` table you'd create with `php artisan make:auth`.
 model User {
-  id            String   @id @default(uuid())
-  email         String   @unique
-  passwordHash  String?  @map("password_hash")
-  username      String   @unique
-  name          String?
-  googleId      String?  @unique @map("google_id")
-  countryCode   String?  @map("country_code")
-  role          UserRole @default(USER)
-  referrerId    String?  @map("referrer_id")
-  referralCode  String?  @unique @map("referral_code")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?  @map("password_hash")
+  username     String   @unique
+  name         String?
+  googleId     String?  @unique @map("google_id")
+  countryCode  String?  @map("country_code")
+  role         UserRole @default(USER)
+  referrerId   String?  @map("referrer_id")
+  referralCode String?  @unique @map("referral_code")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  wallet        Wallet?
-  squads        Squad[]
-  createdLeagues League[]       @relation("LeagueCreator")
-  memberships   LeagueMember[]
-  transactions  Transaction[]
-  referrer      User?          @relation("UserReferrals", fields: [referrerId], references: [id])
-  referrees     User[]         @relation("UserReferrals")
+  wallet             Wallet?
+  squads             Squad[]
+  createdLeagues     League[]            @relation("LeagueCreator")
+  memberships        LeagueMember[]
+  transactions       Transaction[]
+  referrer           User?               @relation("UserReferrals", fields: [referrerId], references: [id])
+  referrees          User[]              @relation("UserReferrals")
+  createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
+  usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
+  chatMessages       LeagueChatMessage[]
+  matchRating        MatchRating?
+  depositRefundClaims DepositRefundClaim[]
+  matchmakingQueueEntry MatchmakingQueueEntry? @relation("MatchmakingQueueOwner")
+  matchedQueueEntries  MatchmakingQueueEntry[] @relation("MatchmakingMatchedUser")
+  webAuthnCredentials  WebAuthnCredential[]
+  accountSignals       AccountSignal[]
+  refreshTokens        RefreshToken[]
 
   @@map("users")
+}
+
+/// Opaque, single-use refresh credentials grouped by login family.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  familyId  String    @map("family_id")
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([familyId])
+  @@index([userId])
+  @@map("refresh_tokens")
 }
 
 /// A Stellar wallet linked to a user for USDC payments.
@@ -219,11 +292,14 @@ model Gameweek {
   fixtures        Fixture[]
   playerStats     PlayerGameweekStats[]
   squadScores     SquadGameweekScore[]
+  leagueScores    LeagueGameweekScore[]
+  transfers       SquadTransfer[]
   leaguesStarting League[]              @relation("LeagueStartGW")
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
+  chipCancellations SquadChipCancellation[]
   leagueFixtures  LeagueFixture[]
-  squadTransfers  SquadTransfer[]
+  matchRatingHistory MatchRatingHistory[]
 
   @@map("gameweeks")
 }
@@ -243,9 +319,10 @@ model Fixture {
   minutes     Int       @default(0)
 
   // Relations
-  gameweek Gameweek? @relation(fields: [gameweekId], references: [id])
-  homeTeam Team      @relation("HomeFixtures", fields: [homeTeamId], references: [id])
-  awayTeam Team      @relation("AwayFixtures", fields: [awayTeamId], references: [id])
+  gameweek    Gameweek?             @relation(fields: [gameweekId], references: [id])
+  homeTeam    Team                  @relation("HomeFixtures", fields: [homeTeamId], references: [id])
+  awayTeam    Team                  @relation("AwayFixtures", fields: [awayTeamId], references: [id])
+  playerStats PlayerGameweekStats[]
 
   @@map("fixtures")
 }
@@ -256,6 +333,7 @@ model PlayerGameweekStats {
   id          Int     @id @default(autoincrement())
   playerId    Int     @map("player_id")
   gameweekId  Int     @map("gameweek_id")
+  fixtureId   Int     @map("fixture_id")
   minutes     Int     @default(0)
   goals       Int     @default(0)
   assists     Int     @default(0)
@@ -263,14 +341,20 @@ model PlayerGameweekStats {
   yellowCards Int     @default(0) @map("yellow_cards")
   redCards    Int     @default(0) @map("red_cards")
   saves       Int     @default(0)
+  goalsConceded   Int     @default(0) @map("goals_conceded")
+  ownGoals        Int     @default(0) @map("own_goals")
+  penaltiesSaved  Int     @default(0) @map("penalties_saved")
+  penaltiesMissed Int @default(0) @map("penalties_missed")
+  bps         Int     @default(0)
   bonus       Int     @default(0)
   totalPoints Int     @default(0) @map("total_points")
 
   // Relations
   player   Player   @relation(fields: [playerId], references: [id])
   gameweek Gameweek @relation(fields: [gameweekId], references: [id])
+  fixture  Fixture  @relation(fields: [fixtureId], references: [id])
 
-  @@unique([playerId, gameweekId])
+  @@unique([playerId, gameweekId, fixtureId])
   @@map("player_gameweek_stats")
 }
 
@@ -291,9 +375,11 @@ model Squad {
   user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   players        SquadPlayer[]
   gameweekScores SquadGameweekScore[]
+  leagueGameweekScores LeagueGameweekScore[]
+  transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
-  squadTransfers SquadTransfer[]
+  chipCancellations SquadChipCancellation[]
 
   @@map("squads")
 }
@@ -332,20 +418,142 @@ model League {
   prizePool       Decimal      @default(0) @map("prize_pool") @db.Decimal(10, 2)
   status          LeagueStatus @default(UPCOMING)
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
+  scoringConfig   Json?        @map("scoring_config")
+  payoutPreset    String       @default("standard") @map("payout_preset")
+  payoutSplitsBps Int[]        @default([]) @map("payout_splits_bps")
+  /// Private leagues are hidden from public search and joinable only via invitation
+  isPrivate       Boolean      @default(false) @map("is_private")
   startGameweekId Int          @map("start_gameweek_id")
   endGameweekId   Int          @map("end_gameweek_id")
   createdAt       DateTime     @default(now()) @map("created_at")
   updatedAt       DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  creator       User            @relation("LeagueCreator", fields: [creatorId], references: [id])
-  startGameweek Gameweek        @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
-  endGameweek   Gameweek        @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
+  creator       User                @relation("LeagueCreator", fields: [creatorId], references: [id])
+  startGameweek Gameweek            @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
+  endGameweek   Gameweek            @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
   members       LeagueMember[]
   transactions  Transaction[]
   fixtures      LeagueFixture[]
+  gameweekScores LeagueGameweekScore[]
 
   @@map("leagues")
+}
+
+/// Scores calculated with a league's custom rule set, isolated from global squad scores.
+model LeagueGameweekScore {
+  id         Int      @id @default(autoincrement())
+  leagueId   String   @map("league_id")
+  squadId    String   @map("squad_id")
+  gameweekId Int      @map("gameweek_id")
+  points     Int
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  league   League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  squad    Squad    @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  gameweek Gameweek @relation(fields: [gameweekId], references: [id], onDelete: Cascade)
+
+  @@unique([leagueId, squadId, gameweekId])
+  @@index([leagueId, gameweekId])
+  @@map("league_gameweek_scores")
+  invitations   LeagueInvitation[]
+  chatMessages  LeagueChatMessage[]
+  seasons       LeagueSeason[]
+  depositExceptions DepositException[]
+
+  @@index([status, isPrivate])
+  @@index([entryFee])
+  @@index([maxMembers])
+  @@map("leagues")
+}
+
+/// A ladder of leagues for a single season. Groups leagues into competitive tiers
+/// so promotions and relegations can be tracked across seasons.
+model LeagueTierGroup {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  description String?
+  season      String
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tiers       LeagueTier[]
+  leagueSeasons LeagueSeason[]
+  placements  LeagueTierPlacement[]
+
+  @@map("league_tier_groups")
+}
+
+/// A named tier inside a league ladder such as "Premier", "Championship" or "Division 2".
+model LeagueTier {
+  id                       String   @id @default(uuid())
+  groupId                  String   @map("group_id")
+  name                     String
+  slug                     String
+  rank                     Int
+  description              String?
+  promotionTargetTierId    String?  @map("promotion_target_tier_id")
+  relegationTargetTierId   String?  @map("relegation_target_tier_id")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  group                   LeagueTierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  promotionTarget         LeagueTier? @relation("PromotionTarget", fields: [promotionTargetTierId], references: [id], onDelete: SetNull)
+  relegationTarget       LeagueTier? @relation("RelegationTarget", fields: [relegationTargetTierId], references: [id], onDelete: SetNull)
+  promotedFrom            LeagueTier[] @relation("PromotionTarget")
+  relegatedFrom          LeagueTier[] @relation("RelegationTarget")
+  leagueSeasons           LeagueSeason[]
+  placements              LeagueTierPlacement[]
+
+  @@unique([groupId, slug])
+  @@unique([groupId, rank])
+  @@map("league_tiers")
+}
+
+/// A league's participation in a single season, including the tier it occupies.
+model LeagueSeason {
+  id              String   @id @default(uuid())
+  leagueId        String   @map("league_id")
+  season          String
+  tierGroupId     String?  @map("tier_group_id")
+  tierId          String?  @map("tier_id")
+  previousSeasonId String?  @map("previous_season_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  league          League           @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  tierGroup       LeagueTierGroup? @relation(fields: [tierGroupId], references: [id], onDelete: SetNull)
+  tier            LeagueTier?      @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  previousSeason  LeagueSeason?    @relation("LeagueSeasonHistory", fields: [previousSeasonId], references: [id], onDelete: SetNull)
+  nextSeason      LeagueSeason[]   @relation("LeagueSeasonHistory")
+  placements      LeagueTierPlacement[]
+
+  @@unique([leagueId, season])
+  @@map("league_seasons")
+}
+
+/// Final standings snapshot used to determine a promotion or relegation event.
+model LeagueTierPlacement {
+  id               String            @id @default(uuid())
+  leagueSeasonId    String            @map("league_season_id")
+  tierId            String            @map("tier_id")
+  groupId           String            @map("group_id")
+  rank              Int               @default(0)
+  movement          LeagueTierMovement @default(STAY)
+  promotedToSeasonId String?           @map("promoted_to_season_id")
+  relegatedToSeasonId String?          @map("relegated_to_season_id")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  leagueSeason      LeagueSeason      @relation(fields: [leagueSeasonId], references: [id], onDelete: Cascade)
+  tier              LeagueTier        @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  group             LeagueTierGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([leagueSeasonId, groupId])
+  @@map("league_tier_placements")
 }
 
 /// A user's membership in a league — links user, squad, and league together.
@@ -380,6 +588,7 @@ model LeagueMember {
   awayFixtures LeagueFixture[] @relation("AwayLeagueFixtures")
 
   @@unique([leagueId, userId])
+  @@index([leagueId, joinedAt, id])
   @@map("league_members")
 }
 
@@ -505,10 +714,12 @@ model SquadChipUsage {
   /// Free Hit only: the squad's lineup before the chip, restored after the gameweek
   previousLineup Json?     @map("previous_lineup")
   revertedAt     DateTime? @map("reverted_at")
+  cancelledAt    DateTime? @map("cancelled_at")
 
   // Relations
   squad    Squad    @relation(fields: [squadId], references: [id], onDelete: Cascade)
   gameweek Gameweek @relation(fields: [gameweekId], references: [id])
+  cancellations SquadChipCancellation[]
 
   @@unique([squadId, season, chipType])
   @@unique([squadId, gameweekId])
@@ -526,6 +737,15 @@ model LeagueFixture {
   homeScore    Int?    @map("home_score")
   awayScore    Int?    @map("away_score")
   isFinished   Boolean @default(false) @map("is_finished")
+  /// True for a knockout playoff fixture generated by the end-of-season bracket,
+  /// as opposed to a regular-season round-robin fixture.
+  isPlayoff    Boolean @default(false) @map("is_playoff")
+  /// 1-indexed knockout round (1 = first playoff round, increasing towards the final). Null outside the playoffs.
+  playoffRound Int?    @map("playoff_round")
+  /// 0-indexed position of this match within its playoff round, used to derive
+  /// the next round's pairings (slot i plays slot i+1, in pairs) without
+  /// depending on row fetch order. Null outside the playoffs.
+  playoffSlot  Int?    @map("playoff_slot")
 
   // Relations
   league     League        @relation(fields: [leagueId], references: [id], onDelete: Cascade)
@@ -535,6 +755,108 @@ model LeagueFixture {
 
   @@unique([leagueId, gameweekId, homeMemberId])
   @@map("league_fixtures")
+}
+
+/// Immutable record of a chip cancellation and the squad state restored by it.
+model SquadChipCancellation {
+  id          Int      @id @default(autoincrement())
+  usageId     Int      @map("usage_id")
+  squadId     String   @map("squad_id")
+  gameweekId  Int      @map("gameweek_id")
+  chipType    ChipType @map("chip_type")
+  cancelledAt DateTime @default(now()) @map("cancelled_at")
+  snapshot    Json
+  usage       SquadChipUsage @relation(fields: [usageId], references: [id], onDelete: Cascade)
+  squad       Squad          @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  gameweek    Gameweek       @relation(fields: [gameweekId], references: [id])
+
+  @@index([squadId, gameweekId, cancelledAt])
+  @@map("squad_chip_cancellations")
+}
+
+/// Current competitive rating used for H2H matchmaking.
+model MatchRating {
+  userId      String   @id @map("user_id")
+  rating      Float    @default(1200)
+  gamesPlayed Int      @default(0) @map("games_played")
+  volatility  Float    @default(0)
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history     MatchRatingHistory[]
+
+  @@index([rating, userId])
+  @@map("match_ratings")
+}
+
+/// Idempotent per-gameweek rating ledger for reproducible rank updates.
+model MatchRatingHistory {
+  id           Int         @id @default(autoincrement())
+  userId       String      @map("user_id")
+  gameweekId   Int         @map("gameweek_id")
+  ratingBefore Float       @map("rating_before")
+  ratingAfter  Float       @map("rating_after")
+  delta        Float
+  createdAt    DateTime    @default(now()) @map("created_at")
+  rating       MatchRating @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  gameweek     Gameweek    @relation(fields: [gameweekId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameweekId])
+  @@index([gameweekId, userId])
+  @@map("match_rating_history")
+}
+
+/// A user's active public matchmaking request and its matched opponent, if any.
+model MatchmakingQueueEntry {
+  id                String            @id @default(uuid())
+  userId            String            @unique @map("user_id")
+  ratingAtRequest   Float             @map("rating_at_request")
+  tolerance         Int               @default(200)
+  status            MatchmakingStatus @default(QUEUED)
+  matchedUserId     String?           @map("matched_user_id")
+  joinedAt          DateTime          @default(now()) @map("joined_at")
+  matchedAt         DateTime?         @map("matched_at")
+  user              User              @relation("MatchmakingQueueOwner", fields: [userId], references: [id], onDelete: Cascade)
+  matchedUser       User?             @relation("MatchmakingMatchedUser", fields: [matchedUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, ratingAtRequest, joinedAt])
+  @@map("matchmaking_queue_entries")
+}
+
+/// On-chain deposits that could not be safely linked to an eligible league member.
+model DepositException {
+  id               String   @id @default(uuid())
+  txHash           String   @unique @map("tx_hash")
+  leagueId         String?  @map("league_id")
+  contractLeagueId String   @map("contract_league_id")
+  senderAddress    String   @map("sender_address")
+  amount           Decimal  @db.Decimal(18, 7)
+  expectedAmount   Decimal? @map("expected_amount") @db.Decimal(18, 7)
+  reason           String
+  detectedAt       DateTime @default(now()) @map("detected_at")
+  league           League?  @relation(fields: [leagueId], references: [id], onDelete: SetNull)
+  claim            DepositRefundClaim?
+
+  @@index([leagueId, detectedAt])
+  @@index([senderAddress, detectedAt])
+  @@map("deposit_exceptions")
+}
+
+/// A signed, idempotent request to refund a specific deposit exception.
+model DepositRefundClaim {
+  id            String          @id @default(uuid())
+  exceptionId   String          @unique @map("exception_id")
+  userId        String          @map("user_id")
+  senderAddress String          @map("sender_address")
+  signature     String
+  status        String          @default("PENDING")
+  refundTxHash  String?         @unique @map("refund_tx_hash")
+  requestedAt   DateTime        @default(now()) @map("requested_at")
+  completedAt   DateTime?       @map("completed_at")
+  exception     DepositException @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, requestedAt])
+  @@map("deposit_refund_claims")
 }
 
 /// Tracks Soroban RPC event indexer position and pagination cursor
@@ -549,7 +871,7 @@ model IndexerCursor {
 
 /// Stores indexed Soroban escrow contract events for audit, reconciliation, and history
 model ContractEvent {
-  id         String   @id @default(uuid())
+  id         String   @default(uuid())
   contractId String?  @map("contract_id")
   eventType  String   @map("event_type")
   leagueId   String?  @map("league_id")
@@ -558,11 +880,57 @@ model ContractEvent {
   payload    Json?
   createdAt  DateTime @default(now()) @map("created_at")
 
-  @@index([eventType])
+  @@id([id, createdAt])
+  @@index([eventType, createdAt])
   @@index([leagueId])
-  @@index([txHash])
+  @@index([txHash, createdAt])
   @@index([ledgerSeq])
   @@map("contract_events")
+}
+
+/// Tamper-evident snapshot of a database-to-chain financial reconciliation.
+model LedgerAuditRun {
+  id                       String   @id
+  horizonLedger            Int      @map("horizon_ledger")
+  sorobanLedger            Int      @map("soroban_ledger")
+  indexedThroughLedger     Int      @map("indexed_through_ledger")
+  expectedBalanceStroops   String   @map("expected_balance_stroops")
+  observedBalanceStroops   String   @map("observed_balance_stroops")
+  discrepancyStroops       String   @map("discrepancy_stroops")
+  thresholdStroops         String   @map("threshold_stroops")
+  findingCount             Int      @map("finding_count")
+  isBalanced               Boolean  @map("is_balanced")
+  previousHash             String?  @map("previous_hash")
+  reportHash               String   @unique @map("report_hash")
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  findings LedgerAuditFinding[]
+
+  @@index([createdAt])
+  @@map("ledger_audit_runs")
+}
+
+/// Individual, traceable discrepancy or audit coverage finding.
+model LedgerAuditFinding {
+  id                    String   @id @default(uuid())
+  auditRunId            String   @map("audit_run_id")
+  severity              String
+  category              String
+  message               String
+  leagueId              String?  @map("league_id")
+  txHash                String?  @map("tx_hash")
+  ledgerSeq             Int?     @map("ledger_seq")
+  expectedStroops       String?  @map("expected_stroops")
+  observedStroops       String?  @map("observed_stroops")
+  discrepancyStroops    String?  @map("discrepancy_stroops")
+  details               Json?
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  auditRun LedgerAuditRun @relation(fields: [auditRunId], references: [id], onDelete: Cascade)
+
+  @@index([auditRunId, severity])
+  @@index([txHash])
+  @@map("ledger_audit_findings")
 }
 
 /// Tracks player price movements detected by the FPL tracking daemon
@@ -598,4 +966,401 @@ model PlayerStatusHistory {
   @@index([playerId])
   @@index([changedAt])
   @@map("player_status_history")
+}
+
+/// Expiring invitation granting capped access to a private league.
+/// Only the SHA-256 hash of the token is stored; the raw token is shown once at creation.
+model LeagueInvitation {
+  id          String    @id @default(uuid())
+  leagueId    String    @map("league_id")
+  tokenHash   String    @unique @map("token_hash")
+  createdById String    @map("created_by_id")
+  expiresAt   DateTime  @map("expires_at")
+  maxUses     Int       @default(1) @map("max_uses")
+  usesCount   Int       @default(0) @map("uses_count")
+  usedAt      DateTime? @map("used_at")
+  usedById    String?   @map("used_by_id")
+  revokedAt   DateTime? @map("revoked_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  league    League @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  createdBy User   @relation("InvitationCreator", fields: [createdById], references: [id])
+  usedBy    User?  @relation("InvitationUser", fields: [usedById], references: [id])
+
+  @@index([leagueId])
+  @@map("league_invitations")
+}
+
+/// A chat message posted by a member in a league's real-time chat.
+/// History is paged newest-first by (leagueId, createdAt).
+model LeagueChatMessage {
+  id        String   @id @default(uuid())
+  leagueId  String   @map("league_id")
+  userId    String   @map("user_id")
+  body      String   @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  league League @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId, createdAt])
+  @@map("league_chat_messages")
+}
+
+/// Dead-letter queue entry for a payout batch that failed on-chain.
+/// Members referenced by an open entry are excluded from automatic dispatch so a
+/// failed payout is isolated until it is retried or discarded.
+model FailedPayout {
+  id                 String             @id @default(uuid())
+  type               TransactionType
+  leagueId           String             @map("league_id")
+  memberIds          String[]           @map("member_ids")
+  recipients         String[]
+  amountPerRecipient Decimal            @map("amount_per_recipient") @db.Decimal(10, 2)
+  status             FailedPayoutStatus @default(PENDING)
+  /// Recoverable errors (network, timeouts) may be retried automatically; others need an admin
+  recoverable        Boolean            @default(false)
+  errorMessage       String             @map("error_message")
+  errorCode          Int?               @map("error_code")
+  attempts           Int                @default(1)
+  lastAttemptAt      DateTime           @default(now()) @map("last_attempt_at")
+  /// When this entry was scheduled for retry (distributed lock-free reprocessing)
+  retryScheduledAt   DateTime?          @map("retry_scheduled_at")
+  /// When this entry becomes eligible for retry (after backoff + jitter delay)
+  nextRetryAt        DateTime?          @map("next_retry_at")
+  resolvedAt         DateTime?          @map("resolved_at")
+  resolvedById       String?            @map("resolved_by_id")
+  resolutionNote     String?            @map("resolution_note")
+  retryTxHash        String?            @map("retry_tx_hash")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([leagueId, status])
+  @@index([nextRetryAt])
+  @@map("failed_payouts")
+}
+
+/// Append-only audit trail of financial ledger operations.
+/// Rows are never updated or deleted (enforced by prisma/sql/financial_audit_log_append_only.sql).
+model FinancialAuditLog {
+  id            String               @id @default(uuid())
+  action        FinancialAuditAction
+  /// User whose funds were affected; null for system-level operations
+  userId        String?              @map("user_id")
+  /// Who triggered the operation: a user/admin ID, or "system" for workers
+  actorId       String               @map("actor_id")
+  leagueId      String?              @map("league_id")
+  transactionId String?              @map("transaction_id")
+  amount        Decimal?             @db.Decimal(10, 2)
+  asset         String?
+  stellarTxHash String?              @map("stellar_tx_hash")
+  metadata      Json?
+  createdAt     DateTime             @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([leagueId, createdAt])
+  @@index([action, createdAt])
+  @@map("financial_audit_logs")
+}
+
+/// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
+/// State lives here (not in memory) so polling resumes after a backend restart.
+model CoordinatedTransaction {
+  /// One durable signed settlement per league; never blindly resubmit after a partition.
+  settlementKey String? @unique @map("settlement_key")
+  id            String                       @id @default(uuid())
+  txHash        String                       @unique @map("tx_hash")
+  /// What the transaction does, e.g. DEPOSIT, SETTLEMENT, REFUND
+  kind          String
+  status        CoordinatedTransactionStatus @default(PENDING)
+  userId        String?                      @map("user_id")
+  leagueId      String?                      @map("league_id")
+  /// Ledger row (transactions.id) to confirm or fail once the outcome is known
+  transactionId String?                      @map("transaction_id")
+  attempts      Int                          @default(0)
+  ledgerSeq     Int?                         @map("ledger_seq")
+  lastError     String?                      @map("last_error")
+  metadata      Json?
+  submittedAt   DateTime                     @default(now()) @map("submitted_at")
+  nextPollAt    DateTime                     @default(now()) @map("next_poll_at")
+  lastPolledAt  DateTime?                    @map("last_polled_at")
+  finalizedAt   DateTime?                    @map("finalized_at")
+  createdAt     DateTime                     @default(now()) @map("created_at")
+  updatedAt     DateTime                     @updatedAt @map("updated_at")
+
+  @@index([status, nextPollAt])
+  @@index([leagueId])
+  @@map("coordinated_transactions")
+}
+
+/// Audit trail of retroactive score corrections (official FPL bonus / stat changes).
+/// One row per changed entity: a player's fixture stats, a squad's gameweek score,
+/// or a league member's running total.
+model ScoreAdjustmentLog {
+  id             String   @id @default(uuid())
+  /// Groups every row written by one adjustment run
+  runId          String   @map("run_id")
+  gameweekId     Int      @map("gameweek_id")
+  /// PLAYER_STAT | SQUAD_SCORE | LEAGUE_MEMBER
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  squadId        String?  @map("squad_id")
+  leagueId       String?  @map("league_id")
+  playerId       Int?     @map("player_id")
+  previousPoints Int      @map("previous_points")
+  delta          Int
+  newPoints      Int      @map("new_points")
+  reason         String
+  details        Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([gameweekId, createdAt])
+  @@index([squadId])
+  @@index([runId])
+  @@map("score_adjustment_logs")
+}
+
+// ============================================================
+// MULTI-TENANT SCHEMA ISOLATION
+// ============================================================
+
+/// Tenant registry: maps tenant IDs to PostgreSQL schemas.
+/// Each entry represents a logical tenant (ENTERPRISE, SPONSORED, or PUBLIC tier).
+/// PUBLIC tier uses the shared 'public' schema; others get dedicated schemas (tenant_<id>, sponsored_<id>).
+model Tenant {
+  id              String   @id @default(uuid())
+  /// Tenant tier: PUBLIC (shared), ENTERPRISE (isolated), SPONSORED (isolated)
+  tier            String   // TenantTier enum: PUBLIC | ENTERPRISE | SPONSORED
+  /// PostgreSQL schema name (e.g., 'public', 'tenant_<uuid>', 'sponsored_<uuid>')
+  schemaName      String   @unique @map("schema_name")
+  /// Human-readable tenant name for logging/audit
+  displayName     String   @map("display_name")
+  /// Data retention period in days; respects tier quotas (default 365)
+  retentionDays   Int      @default(365) @map("retention_days")
+  /// Maximum leagues this tenant can create (enforced per tier)
+  maxLeagues      Int      @default(100) @map("max_leagues")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  /// Soft-delete flag: false means tenant is inactive but schema is preserved
+  isActive        Boolean  @default(true) @map("is_active")
+
+  /// Audit log entries for this tenant
+  securityAudits  TenantSecurityAudit[]
+  /// Migration tracking for this tenant
+  migrations      TenantMigration[]
+
+  @@index([isActive])
+  @@index([tier, isActive])
+  @@map("tenants")
+}
+
+/// Security audit log for tenant boundary violations and suspicious activity.
+/// Records cross-tenant access attempts, schema injection blocks, unauthorized tier access, etc.
+model TenantSecurityAudit {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  /// User who attempted the violation (if authenticated)
+  userId          String?  @map("user_id")
+  /// Schema name that was attempted/blocked
+  attemptedSchema String   @map("attempted_schema")
+  /// Type: cross_tenant_access_attempt | invalid_schema | unauthorized_tier_access | schema_injection_blocked
+  violationType   String   @map("violation_type")
+  /// HTTP request path for tracing
+  requestPath     String?  @map("request_path")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  /// Reference to the tenant involved
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([violationType, createdAt])
+  @@map("tenant_security_audits")
+}
+
+/// Migration tracking per tenant: records which migrations have been applied to each schema.
+/// Used by multiTenantMigration script to ensure idempotent, resumable migrations.
+model TenantMigration {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  /// Migration name (e.g., '20240101_000000_init_tables')
+  migrationName  String   @map("migration_name")
+  /// When this migration was applied to the tenant's schema
+  appliedAt      DateTime @default(now()) @map("applied_at")
+  /// Status: success | failed | pending | rolled_back
+  status         String   @default("success")
+  /// Error message if status is 'failed'
+  errorMessage   String?  @map("error_message")
+
+  /// Reference to the tenant
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, migrationName])
+  @@index([tenantId, appliedAt])
+  @@map("tenant_migrations")
+}
+/// Asymmetric access-token signing key (issue #332). A key signs from
+/// activatesAt until a successor activates, then only verifies until retiresAt.
+model JwtSigningKey {
+  /// Key ID carried in the JWT `kid` header
+  kid                 String    @id
+  algorithm           String
+  /// Public key as a JWK (RFC 7517), served from /.well-known/jwks.json
+  publicJwk           Json      @map("public_jwk")
+  /// PKCS#8 private key, AES-256-GCM encrypted with a key derived from JWT_SECRET
+  encryptedPrivateKey String    @map("encrypted_private_key")
+  activatesAt         DateTime  @map("activates_at")
+  retiresAt           DateTime? @map("retires_at")
+  revokedAt           DateTime? @map("revoked_at")
+  revokedReason       String?   @map("revoked_reason")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  @@index([revokedAt, retiresAt])
+  @@map("jwt_signing_keys")
+}
+
+/// FIDO2 / WebAuthn passkey registered to an account (issue #273)
+model WebAuthnCredential {
+  /// Credential ID (base64url), as returned by the authenticator
+  id         String    @id
+  userId     String    @map("user_id")
+  /// COSE-encoded credential public key
+  publicKey  Bytes     @map("public_key")
+  /// Signature counter (W3C WebAuthn §6.1.1), an unsigned 32-bit value
+  counter    BigInt    @default(0)
+  transports String[]  @default([])
+  /// singleDevice | multiDevice (synced passkey)
+  deviceType String    @map("device_type")
+  backedUp   Boolean   @map("backed_up")
+  aaguid     String
+  name       String
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
+/// Login signature kinds linking accounts in the Sybil graph (issue #274)
+enum AccountSignalType {
+  /// SHA-256 device ID (loginSecurityService.deriveDeviceId)
+  DEVICE
+  /// Client network: IPv4 /24 or IPv6 /64, in CIDR notation
+  IP_SUBNET
+}
+
+/// Login signatures observed per account. The (type, value) prefix of the
+/// primary key is the inverted index "signal -> accounts" (issue #274).
+model AccountSignal {
+  type        AccountSignalType
+  value       String
+  userId      String            @map("user_id")
+  firstSeenAt DateTime          @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([type, value, userId])
+  @@index([userId])
+  @@map("account_signals")
+}
+
+/// Account that created (funded) a Stellar address, resolved once from
+/// Horizon's create_account operation; immutable on-chain (issue #274)
+model StellarAccountFunder {
+  address    String   @id
+  funder     String
+  resolvedAt DateTime @default(now()) @map("resolved_at")
+
+  @@index([funder])
+  @@map("stellar_account_funders")
+}
+
+/// Last good payload per FPL endpoint: the L3 fallback served while the FPL
+/// API is unavailable and the cache tiers are empty (issue #275)
+model FplApiSnapshot {
+  endpoint  String   @id
+  payload   Json
+  fetchedAt DateTime @map("fetched_at")
+
+  @@map("fpl_api_snapshots")
+}
+
+// ============================================================
+// LEAGUE INTEGRITY & COLLUSION DETECTION (Issue #328)
+// ============================================================
+
+/// Flags for detected collusion or suspicious coordination within a league.
+/// Immutable evidence is stored as JSON; status transitions via admin review.
+model LeagueCollusionFlag {
+  id                    String                    @id @default(uuid())
+  leagueId              String                    @map("league_id")
+  
+  // Primary risk pair (if single account, pair to self for singleton flags)
+  accountAId            String                    @map("account_a_id")
+  squadAId              String                    @map("squad_a_id")
+  accountBId            String?                   @map("account_b_id")
+  squadBId              String?                   @map("squad_b_id")
+  
+  // Risk scoring
+  riskScore             Float                     // 0.0 to 1.0
+  confidenceLevel       String                    // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+  suspensionThreshold   Float                     @default(0.85)
+  
+  // Evidence (immutable, reproducible)
+  signalsTriggered      String[]                  // ["TRANSFER_SIMILARITY", "SHARED_IP", ...]
+  evidencePayload       Json                      // full structured record with all signal details
+  configVersion         String                    // audit trail: config version that produced this flag
+  
+  // Admin review state
+  status                String                    @default("FLAGGED")  // "FLAGGED", "DISMISSED", "CONFIRMED", "ESCALATED"
+  reviewedBy            String?                   @map("reviewed_by")
+  reviewedAt            DateTime?                 @map("reviewed_at")
+  reviewNote            String?                   @map("review_note")
+  dismissalReason       String?                   @map("dismissal_reason")
+  
+  // Suspension tracking
+  suspendedLeagueParticipationAt DateTime?       @map("suspended_league_participation_at")
+  suspensionReason      String?                   @map("suspension_reason")
+  
+  // Audit trail
+  createdAt             DateTime                  @default(now()) @map("created_at")
+  updatedAt             DateTime                  @updatedAt @map("updated_at")
+  
+  // Relations
+  league                League                    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  accountA              User                      @relation("FlagAccountA", fields: [accountAId], references: [id], onDelete: Cascade)
+  accountB              User?                     @relation("FlagAccountB", fields: [accountBId], references: [id], onDelete: Cascade)
+  squadA                Squad                     @relation("FlagSquadA", fields: [squadAId], references: [id], onDelete: Cascade)
+  squadB                Squad?                    @relation("FlagSquadB", fields: [squadBId], references: [id], onDelete: Cascade)
+  appeals               SuspensionAppeal[]
+  
+  @@unique([leagueId, accountAId, accountBId])
+  @@index([leagueId, status, riskScore])
+  @@index([leagueId, accountAId])
+  @@index([suspendedLeagueParticipationAt])
+  @@map("league_collusion_flags")
+}
+
+/// User appeals against league participation suspension.
+model SuspensionAppeal {
+  id                    String                    @id @default(uuid())
+  flagId                String                    @map("flag_id")
+  accountId             String                    @map("account_id")
+  appealedAt            DateTime                  @default(now()) @map("appealed_at")
+  reason                String
+  status                String                    @default("PENDING")  // "PENDING", "APPROVED", "REJECTED"
+  reviewedBy            String?                   @map("reviewed_by")
+  reviewedAt            DateTime?                 @map("reviewed_at")
+  reviewNote            String?                   @map("review_note")
+  createdAt             DateTime                  @default(now()) @map("created_at")
+  
+  flag                  LeagueCollusionFlag       @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  account               User                      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  @@index([flagId])
+  @@index([accountId, status])
+  @@map("suspension_appeals")
 }

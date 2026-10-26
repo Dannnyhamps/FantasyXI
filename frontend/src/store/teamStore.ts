@@ -1,5 +1,9 @@
 import { create } from "zustand";
-import { Player, Position } from "@/types";
+import { Player, Position, Squad, SQUAD_RULES } from "@/types";
+import { emitToast } from "@/context/ToastContext";
+import { validateCompleteSquad, validateSubstitution } from "@/lib/formation";
+import { enqueueSquadMutation, QueuedSquadMutation, SquadMutationPayload } from "@/lib/offlineQueue";
+import { saveSquadSnapshot } from "@/lib/offlineStore";
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -11,7 +15,31 @@ export interface LocalSquadPlayer {
   positionOrder: number;
 }
 
+export interface SubstitutionFeedback {
+  type: "success" | "error";
+  message: string;
+}
+
+/** Body of a squad create/replace request; positionOrder follows the local list order. */
+export function buildSquadPayload(name: string, players: LocalSquadPlayer[]): SquadMutationPayload {
+  return {
+    name: name.trim() || "My Fantasy XI",
+    players: players.map((p, idx) => ({
+      playerId: p.playerId,
+      isStarter: p.isStarter,
+      isCaptain: p.isCaptain,
+      isViceCaptain: p.isViceCaptain,
+      positionOrder: idx + 1,
+    })),
+  };
+}
+
+const isOffline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+
 interface TeamState {
+  /** Signed-in manager whose squad this is; needed to queue offline changes. */
+  ownerId: string | null;
+  setOwnerId: (id: string | null) => void;
   squadId: string | null;
   setSquadId: (id: string | null) => void;
   squadName: string;
@@ -21,6 +49,12 @@ interface TeamState {
   
   selectedPlayerId: number | null;
   setSelectedPlayerId: (id: number | null) => void;
+
+  activeDragPlayer: LocalSquadPlayer | null;
+  setActiveDragPlayer: (player: LocalSquadPlayer | null) => void;
+
+  substitutionFeedback: SubstitutionFeedback | null;
+  setSubstitutionFeedback: (feedback: SubstitutionFeedback | null) => void;
   
   activeModalState: {
     isOpen: boolean;
@@ -30,13 +64,24 @@ interface TeamState {
   setActiveModalState: (state: { isOpen: boolean; requiredPosition: Position | null; replacingPlayer: Player | null }) => void;
   
   // Actions
-  handleSwap: (playerAId: number, playerBId: number) => void;
+  /** Replaces local state with a squad loaded from the server or the offline snapshot. */
+  hydrateFromSquad: (squad: Squad) => void;
+  /**
+   * Persists the current lineup to the offline queue and snapshot so it
+   * survives reloads and syncs on reconnection (issue #334). Returns null when
+   * the lineup is incomplete or invalid, since the server would reject it.
+   */
+  persistLineupOffline: () => Promise<QueuedSquadMutation | null>;
+  handleSwap: (playerAId: number, playerBId: number) => boolean;
   handleSetCaptain: (playerId: number) => void;
   handleSetViceCaptain: (playerId: number) => void;
   handlePlayerClick: (clickedPlayer: Player | null, position?: Position) => void;
 }
 
 export const useTeamStore = create<TeamState>((set, get) => ({
+  ownerId: null,
+  setOwnerId: (id) => set({ ownerId: id }),
+
   squadId: null,
   setSquadId: (id) => set({ squadId: id }),
   
@@ -50,6 +95,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   
   selectedPlayerId: null,
   setSelectedPlayerId: (id) => set({ selectedPlayerId: id }),
+
+  activeDragPlayer: null,
+  setActiveDragPlayer: (player) => set({ activeDragPlayer: player }),
+
+  substitutionFeedback: null,
+  setSubstitutionFeedback: (feedback) => set({ substitutionFeedback: feedback }),
   
   activeModalState: {
     isOpen: false,
@@ -57,6 +108,60 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     replacingPlayer: null,
   },
   setActiveModalState: (modalState) => set({ activeModalState: modalState }),
+
+  hydrateFromSquad: (squad) => {
+    set({ squadId: squad.id, squadName: squad.name });
+    if (squad.players && squad.players.length > 0) {
+      set({
+        players: squad.players
+          .filter((sp) => sp.player)
+          .map((sp) => ({
+            id: sp.id,
+            playerId: sp.playerId,
+            player: sp.player!,
+            isStarter: sp.isStarter,
+            isCaptain: sp.isCaptain,
+            isViceCaptain: sp.isViceCaptain,
+            positionOrder: sp.positionOrder,
+          })),
+      });
+    }
+  },
+
+  persistLineupOffline: async () => {
+    const { ownerId, squadId, squadName, players } = get();
+    if (!ownerId || players.length !== SQUAD_RULES.TOTAL_PLAYERS || !validateCompleteSquad(players).valid) {
+      return null;
+    }
+
+    const payload = buildSquadPayload(squadName, players);
+    const mutation = await enqueueSquadMutation({
+      squadId,
+      userId: ownerId,
+      action: squadId ? "update" : "create",
+      payload,
+    });
+
+    // The snapshot is what a reload shows until the server accepts the change
+    saveSquadSnapshot(ownerId, [
+      {
+        id: squadId ?? "",
+        userId: ownerId,
+        name: payload.name,
+        players: players.map((p, idx) => ({
+          id: typeof p.id === "number" ? p.id : idx + 1,
+          squadId: squadId ?? "",
+          playerId: p.playerId,
+          isStarter: p.isStarter,
+          isCaptain: p.isCaptain,
+          isViceCaptain: p.isViceCaptain,
+          positionOrder: idx + 1,
+          player: p.player,
+        })),
+      } as Squad,
+    ]);
+    return mutation;
+  },
 
   handlePlayerClick: (clickedPlayer, position) => {
     const state = get();
@@ -79,70 +184,73 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   handleSwap: (playerAId, playerBId) => {
-    set((state) => {
-      const prev = state.players;
-      const idxA = prev.findIndex((p) => p.playerId === playerAId);
-      const idxB = prev.findIndex((p) => p.playerId === playerBId);
-      if (idxA === -1 || idxB === -1) return { players: prev };
+    const state = get();
+    const prev = state.players;
+    const idxA = prev.findIndex((p) => p.playerId === playerAId);
+    const idxB = prev.findIndex((p) => p.playerId === playerBId);
+    if (idxA === -1 || idxB === -1) return false;
 
-      const clone = [...prev];
-      const a = { ...clone[idxA] };
-      const b = { ...clone[idxB] };
+    const a = prev[idxA];
+    const b = prev[idxB];
 
-      // GKP can only swap with GKP
-      const aIsGkp = a.player.position === Position.GKP;
-      const bIsGkp = b.player.position === Position.GKP;
-      if (aIsGkp !== bIsGkp) {
-        alert("Goalkeepers can only be swapped with other Goalkeepers.");
-        return { players: prev };
-      }
+    // Validate substitution
+    const validation = validateSubstitution(a, b, prev);
+    if (!validation.valid) {
+      const message = validation.reason || "Invalid substitution move.";
+      emitToast.warning(message);
+      set({
+        substitutionFeedback: {
+          type: "error",
+          message,
+        },
+      });
+      return false;
+    }
 
-      const tempStarter = a.isStarter;
-      const tempOrder = a.positionOrder;
+    const clone = [...prev];
+    const newA = { ...a };
+    const newB = { ...b };
 
-      a.isStarter = b.isStarter;
-      a.positionOrder = b.positionOrder;
+    const tempStarter = newA.isStarter;
+    const tempOrder = newA.positionOrder;
 
-      b.isStarter = tempStarter;
-      b.positionOrder = tempOrder;
+    newA.isStarter = newB.isStarter;
+    newA.positionOrder = newB.positionOrder;
 
-      if (!a.isStarter && a.isCaptain) {
-        a.isCaptain = false;
-        b.isCaptain = true;
-      }
-      if (!a.isStarter && a.isViceCaptain) {
-        a.isViceCaptain = false;
-        b.isViceCaptain = true;
-      }
-      if (!b.isStarter && b.isCaptain) {
-        b.isCaptain = false;
-        a.isCaptain = true;
-      }
-      if (!b.isStarter && b.isViceCaptain) {
-        b.isViceCaptain = false;
-        a.isViceCaptain = true;
-      }
+    newB.isStarter = tempStarter;
+    newB.positionOrder = tempOrder;
 
-      clone[idxA] = a;
-      clone[idxB] = b;
+    // Preserve captain / vice-captain validity
+    if (!newA.isStarter && newA.isCaptain) {
+      newA.isCaptain = false;
+      newB.isCaptain = true;
+    }
+    if (!newA.isStarter && newA.isViceCaptain) {
+      newA.isViceCaptain = false;
+      newB.isViceCaptain = true;
+    }
+    if (!newB.isStarter && newB.isCaptain) {
+      newB.isCaptain = false;
+      newA.isCaptain = true;
+    }
+    if (!newB.isStarter && newB.isViceCaptain) {
+      newB.isViceCaptain = false;
+      newA.isViceCaptain = true;
+    }
 
-      // Validate new formation if we swapped a starter with a bench player
-      if (tempStarter !== b.isStarter) {
-        // Need to import validateFormation and count starters dynamically. 
-        // We will inline the validation logic for Outfields here since we don't have access to validateFormation import easily inside the store without adding the import.
-        const newStarters = clone.filter(p => p.isStarter);
-        const def = newStarters.filter(p => p.player.position === Position.DEF).length;
-        const mid = newStarters.filter(p => p.player.position === Position.MID).length;
-        const fwd = newStarters.filter(p => p.player.position === Position.FWD).length;
-        
-        if (def < 3 || def > 5 || mid < 2 || mid > 5 || fwd < 1 || fwd > 3) {
-          alert(`Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`);
-          return { players: prev };
-        }
-      }
+    clone[idxA] = newA;
+    clone[idxB] = newB;
 
-      return { players: clone };
+    const successMessage = `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`;
+    set({
+      players: clone,
+      substitutionFeedback: {
+        type: "success",
+        message: successMessage,
+      },
     });
+    persistIfOffline();
+    return true;
   },
 
   handleSetCaptain: (playerId) => {
@@ -153,6 +261,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         isViceCaptain: p.playerId === playerId ? false : p.isViceCaptain,
       }))
     }));
+    persistIfOffline();
   },
 
   handleSetViceCaptain: (playerId) => {
@@ -163,5 +272,15 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         isCaptain: p.playerId === playerId ? false : p.isCaptain,
       }))
     }));
+    persistIfOffline();
   },
 }));
+
+/** Lineup edits made offline are queued immediately (optimistic UI, persisted). */
+function persistIfOffline(): void {
+  if (!isOffline()) return;
+  useTeamStore
+    .getState()
+    .persistLineupOffline()
+    .catch(() => emitToast.error("Couldn't save your lineup change on this device."));
+}
