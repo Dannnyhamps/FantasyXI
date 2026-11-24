@@ -30,13 +30,17 @@ import { idempotency } from "../middleware/idempotency.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 import { getMyDepositExceptions, getDepositRefundChallenge, submitDepositRefundClaim } from "../controllers/depositRefund.controller.js";
 import {
+  openMicropaymentChannelHandler,
+  getMicropaymentChannelHandler,
+  applyMicropaymentStateUpdateHandler,
+  disputeMicropaymentChannelHandler,
+  settleGameweekMicropaymentChannelsHandler,
   inspectLeagueDisputeArbitrationHandler,
   inspectRefundProposalHandler,
   initiateRefundProposalHandler,
   signRefundProposalHandler,
   broadcastRefundProposalHandler,
   processDisputeTimeoutsHandler,
-} from "../controllers/escrowArbitration.controller.js";
 
 const router = Router({ mergeParams: true });
 // Private high-roller leagues require a ZK buy-in range proof with each deposit
@@ -89,6 +93,13 @@ router.post("/disputes/:disputeId/evidence", mutationRateLimiter, addEvidenceHan
 router.post("/disputes/:disputeId/resolve-payout", requireRole(UserRole.ADMIN), resolveDisputePayoutHandler);
 router.post("/disputes/:disputeId/resolve-refund", requireRole(UserRole.ADMIN), resolveDisputeRefundHandler);
 router.post("/disputes/:disputeId/reject", requireRole(UserRole.ADMIN), rejectDisputeHandler);
+
+// Instant off-chain micropayment channels for gameweek live substitution fees (Issue #427)
+router.post("/micropayments/channels", mutationRateLimiter, openMicropaymentChannelHandler);
+router.get("/micropayments/channels/:channelId", getMicropaymentChannelHandler);
+router.post("/micropayments/channels/:channelId/state", applyMicropaymentStateUpdateHandler);
+router.post("/micropayments/channels/:channelId/dispute", mutationRateLimiter, disputeMicropaymentChannelHandler);
+router.post("/micropayments/gameweeks/:gameweekId/settle", requireRole(UserRole.ADMIN), settleGameweekMicropaymentChannelsHandler);
 
 // Multi-signature smart escrow dispute arbitration & refund flow (Issue #419)
 router.get(
